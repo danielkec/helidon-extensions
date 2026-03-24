@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Helidon LangChain4j Dev UI</title>
+    <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<div class="background-glow background-glow-a"></div>
+<div class="background-glow background-glow-b"></div>
+
+<header class="topbar">
+    <div>
+        <p class="eyebrow">Helidon LangChain4j</p>
+        <h1>Dev UI</h1>
+    </div>
+    <div class="statusbar">
+        <span class="chip" id="agent-chip">No agent</span>
+        <span class="chip chip-accent" id="method-chip">No method</span>
+    </div>
+</header>
+
+<main class="layout">
+    <aside class="panel rail">
+        <section class="panel-section">
+            <div class="section-head">
+                <h2>Agents</h2>
+                <button class="ghost-button" id="refresh-agents" type="button">Refresh</button>
+            </div>
+            <div class="list-stack" id="agent-list"></div>
+        </section>
+    </aside>
+
+    <section class="panel workspace">
+        <div class="workspace-head">
+            <div>
+                <p class="eyebrow">Interactive Agent Run</p>
+                <h2 id="workspace-title">Select an agent</h2>
+            </div>
+            <div class="method-picker">
+                <label for="method-select">Method</label>
+                <select id="method-select"></select>
+            </div>
+        </div>
+
+        <div class="workspace-body">
+            <section class="chat-panel">
+                <div class="chat-panel-head">
+                    <div>
+                        <p class="eyebrow">Conversation</p>
+                        <h3 id="conversation-title">Select an agent method</h3>
+                    </div>
+                    <span class="chip" id="result-summary">No invocation yet</span>
+                </div>
+                <div class="chat-history" id="chat-history"></div>
+            </section>
+
+            <section class="composer-card">
+                <div class="composer-head">
+                    <div>
+                        <h3 id="composer-title">Message composer</h3>
+                        <p class="composer-note" id="composer-note">Select an agent and method to start a browser conversation.</p>
+                    </div>
+                    <div class="button-row">
+                        <button class="ghost-button" id="clear-conversation" type="button">Clear chat</button>
+                        <button class="primary-button" id="invoke-button" type="submit" form="invoke-form">Send</button>
+                    </div>
+                </div>
+
+                <form id="invoke-form" class="field-grid"></form>
+
+                <details class="raw-result-card">
+                    <summary>Last raw result</summary>
+                    <pre id="result-view" class="code-block">Select an agent and run a method.</pre>
+                </details>
+            </section>
+        </div>
+    </section>
+
+    <aside class="panel inspector">
+        <div class="tab-row">
+            <button class="tab-button is-active" data-tab="state" type="button">State</button>
+            <button class="tab-button" data-tab="trace" type="button">Trace</button>
+            <button class="tab-button" data-tab="events" type="button">Events</button>
+        </div>
+
+        <section class="tab-panel is-active" data-panel="state">
+            <div class="section-head">
+                <h2>Agentic State</h2>
+                <span class="eyebrow" id="state-status">No scope</span>
+            </div>
+            <div id="state-view" class="state-inspector-view">
+                <div class="empty-state">Run a method to inspect the latest state snapshot.</div>
+            </div>
+        </section>
+
+        <section class="tab-panel" data-panel="trace">
+            <div class="section-head">
+                <h2>Agent Trace</h2>
+                <span class="eyebrow" id="trace-count">0 invocations</span>
+            </div>
+            <div class="timeline" id="trace-view"></div>
+        </section>
+
+        <section class="tab-panel" data-panel="events">
+            <div class="section-head">
+                <h2>Event Log</h2>
+                <span class="eyebrow" id="event-count">0 events</span>
+            </div>
+            <div class="timeline" id="event-view"></div>
+        </section>
+    </aside>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="./app.js" defer></script>
+</body>
+</html>

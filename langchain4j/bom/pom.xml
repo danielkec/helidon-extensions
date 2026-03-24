@@ -52,6 +52,11 @@
                 <version>${langchain4j.extension.version}</version>
             </dependency>
             <dependency>
+                <groupId>io.helidon.extensions.langchain4j</groupId>
+                <artifactId>helidon-extensions-langchain4j-web-ui</artifactId>
+                <version>${langchain4j.extension.version}</version>
+            </dependency>
+            <dependency>
                 <groupId>io.helidon.extensions.langchain4j.providers</groupId>
                 <artifactId>helidon-extensions-langchain4j-providers-cohere</artifactId>
                 <version>${langchain4j.extension.version}</version>

@@ -124,5 +124,8 @@ class AgentsConfigSupport {
                     agentsConfig.outputGuardrails().toArray(Class[]::new);
             agentBuilder.outputGuardrailClasses(classes);
         }
+
+        serviceRegistry.all(AgentBuilderCustomizer.class)
+                .forEach(customizer -> customizer.customize(ctx, serviceRegistry));
     }
 }

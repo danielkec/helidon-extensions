@@ -35,5 +35,6 @@
         <module>codegen</module>
         <module>langchain4j</module>
         <module>providers</module>
+        <module>web-ui</module>
     </modules>
 </project>
