@@ -39,6 +39,14 @@ final class DevUiChatModel implements ChatModel {
                 .reduce((first, second) -> second)
                 .orElse("");
 
+        if (message.startsWith("Slow workflow:")) {
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
         return ChatResponse.builder()
                 .aiMessage(AiMessage.from("Echo: " + message))
                 .build();

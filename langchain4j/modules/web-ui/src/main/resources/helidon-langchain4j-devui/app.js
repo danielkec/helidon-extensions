@@ -5,6 +5,8 @@ const state = {
     conversations: {}
 };
 
+const INVOCATION_POLL_INTERVAL_MS = 180;
+
 const basePath = (() => {
     const path = window.location.pathname;
     if (path.endsWith("/")) {
@@ -374,7 +376,10 @@ function renderInspector() {
     const conversation = currentConversation();
     const inspection = conversation?.inspection || null;
 
-    if (!state.selectedMethod || !conversation || conversation.runCount === 0) {
+    const hasInspectableInvocation = Boolean(conversation)
+        && (conversation.runCount > 0 || conversation.pending || inspection);
+
+    if (!state.selectedMethod || !hasInspectableInvocation) {
         stateStatus.textContent = "No scope";
         stateView.innerHTML = `<div class="empty-state">Run a method to inspect the latest state snapshot.</div>`;
         traceView.innerHTML = `<div class="empty-state">Run a method to inspect the latest invocation trace.</div>`;
@@ -402,25 +407,120 @@ function renderTimeline(items, kind) {
         return `<div class="empty-state">No ${kind}s captured yet.</div>`;
     }
 
-    return items.map((item) => {
-        const title = kind === "invocation"
-            ? `${escapeHtml(item.agentName || "agent")} • ${escapeHtml(item.agentId || "")}`
-            : `${escapeHtml(item.type || "event")} • ${escapeHtml(item.agent || item.tool || "")}`;
+    return items.map((item) => kind === "event"
+        ? renderEventTimelineCard(item)
+        : renderInvocationTimelineCard(item)
+    ).join("");
+}
 
-        const meta = kind === "invocation"
-            ? escapeHtml(item.agentType || "")
-            : escapeHtml(item.timestamp || "");
+function renderInvocationTimelineCard(item) {
+    const title = `${escapeHtml(item.agentName || "agent")} • ${escapeHtml(item.agentId || "")}`;
+    const meta = escapeHtml(item.agentType || "");
+    const details = invocationDetailEntries(item);
 
-        return `
-            <article class="timeline-card">
-                <div class="timeline-title">
-                    <span>${title}</span>
-                </div>
-                <div class="timeline-meta">${meta}</div>
-                <pre>${escapeHtml(pretty(item))}</pre>
-            </article>
-        `;
-    }).join("");
+    return `
+        <article class="timeline-card">
+            <div class="timeline-title">
+                <span>${title}</span>
+            </div>
+            <div class="timeline-meta">${meta}</div>
+            ${renderEventDetails(details)}
+        </article>
+    `;
+}
+
+function renderEventTimelineCard(item) {
+    const title = `${escapeHtml(item.type || "event")} • ${escapeHtml(item.agent || item.tool || "")}`;
+    const meta = escapeHtml(item.timestamp || "");
+    const details = eventDetailEntries(item);
+
+    return `
+        <article class="timeline-card">
+            <div class="timeline-title">
+                <span>${title}</span>
+            </div>
+            <div class="timeline-meta">${meta}</div>
+            ${renderEventDetails(details)}
+        </article>
+    `;
+}
+
+function renderEventDetails(entries) {
+    if (!entries.length) {
+        return `<div class="empty-state">No additional event details.</div>`;
+    }
+
+    return `
+        <ul class="event-detail-list">
+            ${entries.map(([name, value]) => renderEventDetailItem(name, value)).join("")}
+        </ul>
+    `;
+}
+
+function eventDetailEntries(item) {
+    return Object.entries(item || {})
+        .filter(([name, value]) => name !== "type" && name !== "timestamp" && value !== undefined);
+}
+
+function invocationDetailEntries(item) {
+    return Object.entries(item || {})
+        .filter(([name, value]) => !["agentType", "agentName", "agentId"].includes(name) && value !== undefined);
+}
+
+function renderEventDetailItem(name, value) {
+    return renderCompactDetailItem(name, value);
+}
+
+function renderCompactDetailItem(name, value) {
+    const inlineValue = renderEventInlineValue(value);
+    return `
+        <li class="event-detail-item state-variable-item">
+            ${inlineValue
+                ? `
+                    <div class="event-detail-line">
+                        <span class="event-detail-name">${escapeHtml(name)}:</span>
+                        <span class="event-detail-inline">${inlineValue}</span>
+                    </div>
+                `
+                : `
+                    <details class="event-detail-section">
+                        <summary>
+                            <span class="event-detail-name">${escapeHtml(name)}:</span>
+                            <span class="event-detail-summary">${escapeHtml(stateValueSummary(value))}</span>
+                        </summary>
+                        <div class="event-detail-section-body">
+                            ${renderStateValue(value)}
+                        </div>
+                    </details>
+                `}
+        </li>
+    `;
+}
+
+function renderEventInlineValue(value) {
+    if (value === undefined || value === null || value === "") {
+        return `<span class="event-detail-empty">No value</span>`;
+    }
+
+    if (typeof value === "number" || typeof value === "boolean") {
+        return escapeHtml(String(value));
+    }
+
+    if (typeof value === "string") {
+        const normalized = String(value).replace(/\r\n?/g, "\n");
+        if (!normalized.includes("\n") && normalized.length <= 88) {
+            return isRenderableMarkdown(normalized)
+                ? renderMarkdownInline(normalized)
+                : escapeHtml(normalized);
+        }
+        return "";
+    }
+
+    const compact = JSON.stringify(value);
+    if (compact && compact.length <= 88 && !compact.includes("\n")) {
+        return `<code class="event-inline-code">${escapeHtml(compact)}</code>`;
+    }
+    return "";
 }
 
 function renderStateSnapshot(stateData) {
@@ -430,30 +530,14 @@ function renderStateSnapshot(stateData) {
     }
 
     return `
-        <ul class="state-variable-list">
+        <ul class="state-variable-list event-detail-list">
             ${entries.map(([name, value]) => renderStateVariable(name, value)).join("")}
         </ul>
     `;
 }
 
 function renderStateVariable(name, value) {
-    const valueInitiallyExpanded = stateValueStartsExpanded(value);
-    return `
-        <li class="state-variable-item">
-            <div class="state-variable-shell">
-                <div class="state-variable-head">
-                    <span class="state-variable-name">${escapeHtml(name)}</span>
-                    <span class="state-variable-summary">${escapeHtml(stateValueSummary(value))}</span>
-                </div>
-                <details class="state-variable-section"${valueInitiallyExpanded ? " open" : ""}>
-                    <summary>Value</summary>
-                    <div class="state-variable-section-body state-value-body">
-                        ${renderStateValue(value)}
-                    </div>
-                </details>
-            </div>
-        </li>
-    `;
+    return renderCompactDetailItem(name, value);
 }
 
 function stateValueSummary(value) {
@@ -481,31 +565,6 @@ function stateValueKind(value) {
         return "array";
     }
     return typeof value;
-}
-
-function stateValueStartsExpanded(value) {
-    if (value === undefined || value === null || value === "") {
-        return true;
-    }
-    if (typeof value === "number" || typeof value === "boolean") {
-        return true;
-    }
-    if (typeof value !== "string") {
-        return false;
-    }
-
-    const normalized = String(value).replace(/\r\n?/g, "\n");
-    if (!normalized.trim() || normalized.includes("\n")) {
-        return false;
-    }
-    if (!isRenderableMarkdown(normalized)) {
-        return normalized.length <= 88;
-    }
-
-    const blocks = markdownBlocks(normalized);
-    return blocks.length === 1
-        && blocks[0].type === "paragraph"
-        && normalized.length <= 72;
 }
 
 function renderStateValue(value) {
@@ -2042,12 +2101,14 @@ async function invokeAgent() {
 
         syncConversationControls();
         renderResult();
+        renderInspector();
         renderChatHistory();
 
-        const response = await api("/api/invoke", {
+        const started = await api("/api/invocations", {
             method: "POST",
             body: JSON.stringify(payload)
         });
+        const response = await pollInvocation(started.invocationId, conversation);
 
         conversation.pending = false;
         conversation.pendingInvocationId = null;
@@ -2073,10 +2134,30 @@ async function invokeAgent() {
             }
             syncConversationControls();
             renderResult();
+            renderInspector();
             renderChatHistory();
         }
         showError(error);
     }
+}
+
+async function pollInvocation(invocationId, conversation) {
+    let response = await api(`/api/invocations/${encodeURIComponent(invocationId)}`, {headers: {}});
+
+    while (response.status === "running") {
+        conversation.inspection = response.inspection || conversation.inspection;
+        renderInspector();
+        await delay(INVOCATION_POLL_INTERVAL_MS);
+        response = await api(`/api/invocations/${encodeURIComponent(invocationId)}`, {headers: {}});
+    }
+
+    conversation.inspection = response.inspection || conversation.inspection;
+    renderInspector();
+
+    if (response.status === "failed") {
+        throw new Error(response.error || "Invocation failed");
+    }
+    return response;
 }
 
 function collectInvokePayload(conversation) {
@@ -2334,6 +2415,10 @@ function createConversationMemoryId() {
         return `browser-${window.crypto.randomUUID()}`;
     }
     return `browser-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function delay(durationMs) {
+    return new Promise((resolve) => window.setTimeout(resolve, durationMs));
 }
 
 function pretty(value) {

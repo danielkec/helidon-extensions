@@ -160,6 +160,7 @@ final class LangChain4jDevUiRecorder implements AgentListener {
         private final LangChain4jDevUiRecorder owner;
         private final Deque<Map<String, Object>> events = new ArrayDeque<>();
         private ScopeSnapshot scopeSnapshot;
+        private Consumer<ProgressSnapshot> progressListener;
 
         private Capture(LangChain4jDevUiRecorder owner) {
             this.owner = owner;
@@ -173,6 +174,12 @@ final class LangChain4jDevUiRecorder implements AgentListener {
             return scopeSnapshot;
         }
 
+        Capture progressListener(Consumer<ProgressSnapshot> progressListener) {
+            this.progressListener = progressListener;
+            notifyProgress();
+            return this;
+        }
+
         @Override
         public void close() {
             owner.release(this);
@@ -183,6 +190,7 @@ final class LangChain4jDevUiRecorder implements AgentListener {
                 events.removeFirst();
             }
             events.addLast(event);
+            notifyProgress();
         }
 
         private void scope(AgenticScope scope) {
@@ -203,6 +211,14 @@ final class LangChain4jDevUiRecorder implements AgentListener {
                     ? newSnapshot.invocations()
                     : scopeSnapshot.invocations();
             scopeSnapshot = new ScopeSnapshot(mergedState, mergedInvocations);
+            notifyProgress();
+        }
+
+        private void notifyProgress() {
+            if (progressListener == null) {
+                return;
+            }
+            progressListener.accept(new ProgressSnapshot(events(), scopeSnapshot));
         }
     }
 
@@ -215,6 +231,9 @@ final class LangChain4jDevUiRecorder implements AgentListener {
                     .toList();
             return new ScopeSnapshot(new LinkedHashMap<>(normalizedState), List.copyOf(normalizedInvocations));
         }
+    }
+
+    record ProgressSnapshot(List<Map<String, Object>> events, ScopeSnapshot scopeSnapshot) {
     }
 
     private static Map<String, Object> normalizeInvocation(AgentInvocation invocation) {

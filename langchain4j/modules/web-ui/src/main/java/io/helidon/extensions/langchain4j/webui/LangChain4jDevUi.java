@@ -21,6 +21,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
 import java.lang.reflect.Type;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collections;
@@ -30,6 +31,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 import java.util.stream.IntStream;
 
@@ -75,11 +79,14 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
     public static final String DEFAULT_WEB_CONTEXT = "/langchain4j/ui";
 
     private static final String STATIC_LOCATION = "helidon-langchain4j-devui";
+    private static final Duration INVOCATION_JOB_RETENTION = Duration.ofMinutes(10);
+    private static final int MAX_INVOCATION_JOBS = 200;
 
     private final LangChain4jDevUiConfig config;
     private final ServiceRegistry registry;
     private final LangChain4jDevUiRecorder recorder;
     private final Map<String, AgentHandle> agents;
+    private final ConcurrentMap<String, InvocationJob> invocationJobs;
 
     private LangChain4jDevUi(LangChain4jDevUiConfig config,
                              ServiceRegistry registry,
@@ -88,6 +95,7 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         this.registry = Objects.requireNonNull(registry);
         this.recorder = Objects.requireNonNull(recorder);
         this.agents = Collections.unmodifiableMap(discoverAgents());
+        this.invocationJobs = new ConcurrentHashMap<>();
     }
 
     /**
@@ -166,6 +174,8 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         rules.get(context, this::redirectIndex)
                 .get(context + "/api/agents", this::listAgents)
                 .post(context + "/api/invoke", this::invoke)
+                .post(context + "/api/invocations", this::startInvocation)
+                .get(context + "/api/invocations/{invocationId}", this::invocationStatus)
                 .register(context, StaticContentFeature.createService(ClasspathHandlerConfig.builder()
                                                                              .location(STATIC_LOCATION)
                                                                              .welcome("index.html")
@@ -185,20 +195,16 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
 
     private void invoke(ServerRequest req, ServerResponse res) {
         try {
-            InvokeRequest request = LangChain4jDevUiJsonSupport.read(req.content().inputStream(), InvokeRequest.class);
-            if (request == null || request.agent() == null || request.method() == null) {
-                throw new DevUiException(Status.BAD_REQUEST_400, "Agent and method must be provided");
-            }
-
-            AgentHandle agent = agent(request.agent());
-            AgentMethodHandle method = agent.method(request.method());
-            Map<String, Object> arguments = request.arguments() == null ? Map.of() : request.arguments();
-            Map<String, Object> state = request.state() == null ? Map.of() : request.state();
-            InvocationResult result = invoke(agent, method, request.memoryId(), arguments, state);
+            ResolvedInvokeRequest request = resolveInvokeRequest(req);
+            InvocationResult result = invoke(request.agent(),
+                                             request.method(),
+                                             request.memoryId(),
+                                             request.arguments(),
+                                             request.state());
 
             LinkedHashMap<String, Object> response = new LinkedHashMap<>();
-            response.put("agent", agent.name());
-            response.put("method", method.id());
+            response.put("agent", request.agent().name());
+            response.put("method", request.method().id());
             response.put("result", result.result());
             if (result.inspection() != null) {
                 response.put("inspection", result.inspection());
@@ -211,17 +217,91 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         }
     }
 
+    private void startInvocation(ServerRequest req, ServerResponse res) {
+        try {
+            cleanupInvocationJobs();
+            ResolvedInvokeRequest request = resolveInvokeRequest(req);
+            InvocationJob job = new InvocationJob(UUID.randomUUID().toString(),
+                                                  request.agent().name(),
+                                                  request.method().id());
+            invocationJobs.put(job.id(), job);
+            Thread.startVirtualThread(() -> runInvocationJob(job, request));
+
+            res.status(Status.ACCEPTED_202);
+            json(res, job.snapshot());
+        } catch (DevUiException e) {
+            error(res, e.status(), e.getMessage());
+        } catch (Exception e) {
+            error(res, Status.INTERNAL_SERVER_ERROR_500, rootMessage(e));
+        }
+    }
+
+    private void invocationStatus(ServerRequest req, ServerResponse res) {
+        try {
+            cleanupInvocationJobs();
+            String invocationId = pathParameter(req, "invocationId");
+            InvocationJob job = invocationJobs.get(invocationId);
+            if (job == null) {
+                throw new DevUiException(Status.NOT_FOUND_404, "Invocation " + invocationId + " not found");
+            }
+            json(res, job.snapshot());
+        } catch (DevUiException e) {
+            error(res, e.status(), e.getMessage());
+        }
+    }
+
+    private ResolvedInvokeRequest resolveInvokeRequest(ServerRequest req) {
+        InvokeRequest request = LangChain4jDevUiJsonSupport.read(req.content().inputStream(), InvokeRequest.class);
+        if (request == null || request.agent() == null || request.method() == null) {
+            throw new DevUiException(Status.BAD_REQUEST_400, "Agent and method must be provided");
+        }
+
+        AgentHandle agent = agent(request.agent());
+        AgentMethodHandle method = agent.method(request.method());
+        Map<String, Object> arguments = request.arguments() == null ? Map.of() : request.arguments();
+        Map<String, Object> state = request.state() == null ? Map.of() : request.state();
+        return new ResolvedInvokeRequest(agent, method, request.memoryId(), arguments, state);
+    }
+
+    private void runInvocationJob(InvocationJob job, ResolvedInvokeRequest request) {
+        try {
+            InvocationResult result = invoke(request.agent(),
+                                             request.method(),
+                                             request.memoryId(),
+                                             request.arguments(),
+                                             request.state(),
+                                             job::progress);
+            job.complete(result);
+        } catch (DevUiException e) {
+            job.fail(e.status(), e.getMessage());
+        } catch (Exception e) {
+            job.fail(Status.INTERNAL_SERVER_ERROR_500, rootMessage(e));
+        }
+    }
+
     private InvocationResult invoke(AgentHandle agent,
                                     AgentMethodHandle method,
                                     String requestedMemoryId,
                                     Map<String, Object> arguments,
                                     Map<String, Object> initialState) {
+        return invoke(agent, method, requestedMemoryId, arguments, initialState, null);
+    }
+
+    private InvocationResult invoke(AgentHandle agent,
+                                    AgentMethodHandle method,
+                                    String requestedMemoryId,
+                                    Map<String, Object> arguments,
+                                    Map<String, Object> initialState,
+                                    Consumer<Map<String, Object>> progressConsumer) {
         Object[] invocationArguments = bindArguments(method, requestedMemoryId, arguments);
         Map<String, Object> boundState = bindState(method, initialState);
         PreparedInvocation preparedInvocation = prepareInvocation(agent, method, requestedMemoryId, boundState);
         Map<String, Object> normalizedInput = normalizeInput(method, invocationArguments, boundState);
 
         try (LangChain4jDevUiRecorder.Capture capture = recorder.capture()) {
+            if (progressConsumer != null) {
+                capture.progressListener(progress -> progressConsumer.accept(progressInspection(normalizedInput, progress)));
+            }
             Object invocationResult = method.method().invoke(preparedInvocation.target(), invocationArguments);
             List<Map<String, Object>> events = capture.events();
             Object normalizedResult;
@@ -254,6 +334,9 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
 
             scopeSnapshot = enrichInspectionScope(scopeSnapshot, normalizedResult, events);
             Map<String, Object> inspection = inspection(normalizedInput, normalizedResult, scopeSnapshot, events);
+            if (progressConsumer != null) {
+                progressConsumer.accept(inspection);
+            }
             return new InvocationResult(normalizedResult, inspection);
         } catch (IllegalAccessException e) {
             throw new DevUiException(Status.INTERNAL_SERVER_ERROR_500, e.getMessage(), e);
@@ -264,6 +347,12 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                     : Status.INTERNAL_SERVER_ERROR_500;
             throw new DevUiException(status, rootMessage(target), target);
         }
+    }
+
+    private Map<String, Object> progressInspection(Map<String, Object> normalizedInput,
+                                                   LangChain4jDevUiRecorder.ProgressSnapshot progress) {
+        LangChain4jDevUiRecorder.ScopeSnapshot scopeSnapshot = inspectionScope(null, progress.scopeSnapshot());
+        return inspection(normalizedInput, null, scopeSnapshot, progress.events());
     }
 
     private Map<String, Object> inspection(Map<String, Object> input,
@@ -512,6 +601,24 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
 
     private String pathParameter(ServerRequest req, String name) {
         return req.path().pathParameters().get(name);
+    }
+
+    private void cleanupInvocationJobs() {
+        Instant retentionCutoff = Instant.now().minus(INVOCATION_JOB_RETENTION);
+        invocationJobs.entrySet().removeIf(entry -> entry.getValue().terminal()
+                && entry.getValue().lastUpdated().isBefore(retentionCutoff));
+
+        int overflow = invocationJobs.size() - MAX_INVOCATION_JOBS;
+        if (overflow <= 0) {
+            return;
+        }
+
+        invocationJobs.values().stream()
+                .filter(InvocationJob::terminal)
+                .sorted((left, right) -> left.lastUpdated().compareTo(right.lastUpdated()))
+                .limit(overflow)
+                .map(InvocationJob::id)
+                .forEach(invocationJobs::remove);
     }
 
     private void json(ServerResponse res, Object entity) {
@@ -788,10 +895,88 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                                 Map<String, Object> state) {
     }
 
+    private record ResolvedInvokeRequest(AgentHandle agent,
+                                         AgentMethodHandle method,
+                                         String memoryId,
+                                         Map<String, Object> arguments,
+                                         Map<String, Object> state) {
+    }
+
     private record InvocationResult(Object result, Map<String, Object> inspection) {
     }
 
     private record PreparedInvocation(Object target, DefaultAgenticScope scope) {
+    }
+
+    private static final class InvocationJob {
+        private final String id;
+        private final String agent;
+        private final String method;
+        private final Instant createdAt = Instant.now();
+
+        private volatile Instant lastUpdated = createdAt;
+        private volatile String status = "running";
+        private volatile Object result;
+        private volatile Map<String, Object> inspection;
+        private volatile String error;
+        private volatile int statusCode = Status.ACCEPTED_202.code();
+
+        private InvocationJob(String id, String agent, String method) {
+            this.id = id;
+            this.agent = agent;
+            this.method = method;
+        }
+
+        private String id() {
+            return id;
+        }
+
+        private Instant lastUpdated() {
+            return lastUpdated;
+        }
+
+        private boolean terminal() {
+            return !"running".equals(status);
+        }
+
+        private void progress(Map<String, Object> inspection) {
+            this.inspection = inspection == null ? null : new LinkedHashMap<>(inspection);
+            this.lastUpdated = Instant.now();
+        }
+
+        private void complete(InvocationResult result) {
+            this.result = result.result();
+            this.inspection = result.inspection() == null ? null : new LinkedHashMap<>(result.inspection());
+            this.status = "completed";
+            this.statusCode = Status.OK_200.code();
+            this.lastUpdated = Instant.now();
+        }
+
+        private void fail(Status status, String error) {
+            this.status = "failed";
+            this.statusCode = status.code();
+            this.error = error;
+            this.lastUpdated = Instant.now();
+        }
+
+        private Map<String, Object> snapshot() {
+            LinkedHashMap<String, Object> snapshot = new LinkedHashMap<>();
+            snapshot.put("invocationId", id);
+            snapshot.put("agent", agent);
+            snapshot.put("method", method);
+            snapshot.put("status", status);
+            snapshot.put("statusCode", statusCode);
+            snapshot.put("createdAt", createdAt.toString());
+            snapshot.put("lastUpdated", lastUpdated.toString());
+            snapshot.put("result", result);
+            if (inspection != null) {
+                snapshot.put("inspection", inspection);
+            }
+            if (error != null) {
+                snapshot.put("error", error);
+            }
+            return snapshot;
+        }
     }
 
     private static class DevUiException extends RuntimeException {

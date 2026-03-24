@@ -125,6 +125,11 @@ Invocation output should include:
   - normalized invocation trace
   - recorded listener events
 
+Live browser-progress requirement:
+
+- the UI must be able to surface recorded events while an invocation is still running, not only after the final response arrives
+- backend support uses an async invocation job with incremental inspection snapshots that the browser can poll during execution
+
 Inspection fallback behavior for ephemeral or partially retained scopes:
 
 - if a workflow returns `null`, recover the effective result from the recorded agent output key or conventional `response` state slot when possible
@@ -172,6 +177,8 @@ Endpoints:
 - `GET /langchain4j/ui/index.html`
 - `GET /langchain4j/ui/api/agents`
 - `POST /langchain4j/ui/api/invoke`
+- `POST /langchain4j/ui/api/invocations`
+- `GET /langchain4j/ui/api/invocations/{id}`
 
 `POST /api/invoke` accepts:
 
@@ -208,13 +215,16 @@ UI capabilities:
 - show browser conversation history as chat bubbles, with a composer anchored below the transcript
 - support consistent keyboard invocation shortcuts across agents and forms, with explicit multiline-editor shortcuts where needed
 - show an in-flight progress bubble and a visually active run/send button while the UI is waiting for an agent response
+- refresh the inspector dynamically while a workflow is running so events and trace details appear progressively in the browser
 - render object-shaped input and output payloads inside chat bubbles as named variable bullets, with string values interpreted as markdown
 - handle indented markdown blocks inside bubble values, including fenced code blocks emitted under list items and markdown tables
 - syntax-highlight fenced markdown code blocks in the browser, with built-in support for Java, JSON, YAML, XML, and bash without adding a frontend toolchain
 - preserve original code line wrapping inside fenced blocks and use horizontal scrolling instead of forced line breaks for wide snippets
 - render enum-typed arguments and agentic state variables as browser select controls populated from the discovered Java enum constants
-- present agentic context variables as a structured bullet list in the state inspector, with a single compact status line and value sections that auto-expand only for short single-line values
+- present agentic context variables in the same compact `key: value` bullet style as events, showing short single-line values inline and collapsing longer or structured values behind expandable sections without a separate value label
 - render string values in the state inspector as markdown only when valid markdown syntax is detected, otherwise fall back to a plain text block
+- render event-log payloads as compact `key: value` bullets, with tight line spacing for scanability, showing short single-line values inline and collapsing longer or structured values behind expandable sections
+- render invocation trace payloads in the same compact bullet style as events, keeping agent identity in the card header and showing invocation input/output as `key: value` details
 - keep non-chat methods usable by rendering their request and response pairs inside the same transcript surface
 - inspect the latest raw JSON result
 - inspect the latest state snapshot, invocation trace, and event log
@@ -236,6 +246,7 @@ Add tests in the new module covering:
 - invoke endpoint calls an agent successfully
 - conditional-agent state inputs are surfaced and applied
 - latest invocation inspection contains trace and events
+- async invocation polling exposes live progress before workflow completion
 - legacy session routes are not exposed
 
 Use:

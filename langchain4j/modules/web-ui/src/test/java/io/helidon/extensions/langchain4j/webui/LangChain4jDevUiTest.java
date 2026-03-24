@@ -200,6 +200,48 @@ class LangChain4jDevUiTest {
     }
 
     @Test
+    void reportsInvocationProgressWhileWorkflowIsRunning() throws Exception {
+        LinkedHashMap<String, Object> invokeRequest = new LinkedHashMap<>();
+        invokeRequest.put("agent", "browser-slow-workflow");
+        invokeRequest.put("method", "ask(String)");
+        invokeRequest.put("arguments", Map.of("question", "Show live progress"));
+
+        ClientResponseTyped<String> startResponse = client.post("/langchain4j/ui/api/invocations")
+                .submit(JSONB.toJson(invokeRequest), String.class);
+
+        assertThat(startResponse.status(), is(Status.ACCEPTED_202));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> started = JSONB.fromJson(startResponse.entity(), LinkedHashMap.class);
+        String invocationId = String.valueOf(started.get("invocationId"));
+        assertThat(String.valueOf(started.get("status")), equalTo("running"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> running = waitForInvocation(invocationId, snapshot -> {
+            if (!"running".equals(snapshot.get("status"))) {
+                return false;
+            }
+            Object inspection = snapshot.get("inspection");
+            if (!(inspection instanceof Map<?, ?> inspectionMap)) {
+                return false;
+            }
+            Object events = inspectionMap.get("events");
+            return events instanceof List<?> eventList && !eventList.isEmpty();
+        });
+
+        assertThat(running.get("status"), equalTo("running"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> runningInspection = (Map<String, Object>) running.get("inspection");
+        assertThat(runningInspection, notNullValue());
+        assertThat(((List<?>) runningInspection.get("events")).size(), greaterThan(0));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> completed = waitForInvocation(invocationId,
+                                                          snapshot -> "completed".equals(snapshot.get("status")));
+        assertThat(completed.get("status"), equalTo("completed"));
+        assertThat(completed.get("result"), equalTo("Echo: Slow workflow: Show live progress"));
+    }
+
+    @Test
     void invokesAgentWithEnumArgument() {
         LinkedHashMap<String, Object> invokeRequest = new LinkedHashMap<>();
         invokeRequest.put("agent", "browser-enum-agent");
@@ -251,5 +293,25 @@ class LangChain4jDevUiTest {
                 .request(String.class);
 
         assertThat(missingSessionList.status(), is(Status.NOT_FOUND_404));
+    }
+
+    private Map<String, Object> waitForInvocation(String invocationId,
+                                                  java.util.function.Predicate<Map<String, Object>> condition)
+            throws Exception {
+        Map<String, Object> latest = null;
+        for (int attempt = 0; attempt < 40; attempt++) {
+            ClientResponseTyped<String> pollResponse = client.get("/langchain4j/ui/api/invocations/" + invocationId)
+                    .request(String.class);
+
+            assertThat(pollResponse.status(), is(Status.OK_200));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> snapshot = JSONB.fromJson(pollResponse.entity(), LinkedHashMap.class);
+            latest = snapshot;
+            if (condition.test(snapshot)) {
+                return snapshot;
+            }
+            Thread.sleep(25);
+        }
+        throw new AssertionError("Invocation did not reach expected state: " + latest);
     }
 }
