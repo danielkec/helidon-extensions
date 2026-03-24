@@ -51,7 +51,10 @@
                         <p class="eyebrow">Conversation</p>
                         <h3 id="conversation-title">Select an agent method</h3>
                     </div>
-                    <span class="chip" id="result-summary">No invocation yet</span>
+                    <div class="run-progress" id="conversation-progress" aria-live="polite">
+                        <div class="run-progress-empty">Progress appears here during agentic runs.</div>
+                    </div>
+                    <span class="chip chat-panel-head-status" id="result-summary">No invocation yet</span>
                 </div>
                 <div class="chat-history" id="chat-history"></div>
             </section>

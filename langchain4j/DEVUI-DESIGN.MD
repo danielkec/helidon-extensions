@@ -216,6 +216,7 @@ UI capabilities:
 - support consistent keyboard invocation shortcuts across agents and forms, with explicit multiline-editor shortcuts where needed
 - show an in-flight progress bubble and a visually active run/send button while the UI is waiting for an agent response
 - refresh the inspector dynamically while a workflow is running so events and trace details appear progressively in the browser
+- show a live agentic-run progress strip in the conversation header, deriving agent and tool marbles from the event stream with dotted connectors, small name labels, and pulsing in-flight steps until matching completion events arrive
 - render object-shaped input and output payloads inside chat bubbles as named variable bullets, with string values interpreted as markdown
 - handle indented markdown blocks inside bubble values, including fenced code blocks emitted under list items and markdown tables
 - syntax-highlight fenced markdown code blocks in the browser, with built-in support for Java, JSON, YAML, XML, and bash without adding a frontend toolchain

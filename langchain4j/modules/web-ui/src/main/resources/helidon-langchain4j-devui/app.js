@@ -20,6 +20,7 @@ const methodSelect = document.getElementById("method-select");
 const invokeForm = document.getElementById("invoke-form");
 const workspaceTitle = document.getElementById("workspace-title");
 const conversationTitle = document.getElementById("conversation-title");
+const conversationProgress = document.getElementById("conversation-progress");
 const composerTitle = document.getElementById("composer-title");
 const composerNote = document.getElementById("composer-note");
 const invokeButton = document.getElementById("invoke-button");
@@ -372,9 +373,166 @@ function renderResult() {
         : "Run a method to inspect the latest raw result.";
 }
 
+function renderConversationProgress(conversation = currentConversation()) {
+    if (!state.selectedMethod) {
+        conversationProgress.innerHTML = `<div class="run-progress-empty">Select an agent method to see live progress.</div>`;
+        return;
+    }
+
+    const events = conversation?.pending
+        ? (conversation.progressEvents || [])
+        : (conversation?.inspection?.events || conversation?.progressEvents || []);
+    const steps = buildRunProgressSteps(events);
+
+    if (!steps.length) {
+        const text = conversation?.pending
+            ? "Waiting for first event..."
+            : conversation?.runCount
+                ? "No agent or tool events captured."
+                : "Progress appears here during agentic runs.";
+        const pendingClass = conversation?.pending ? " is-pending" : "";
+        const pendingDot = conversation?.pending
+            ? `<span class="run-progress-empty-dot" aria-hidden="true"></span>`
+            : "";
+        conversationProgress.innerHTML = `
+            <div class="run-progress-empty${pendingClass}">
+                ${pendingDot}
+                <span>${escapeHtml(text)}</span>
+            </div>
+        `;
+        return;
+    }
+
+    conversationProgress.innerHTML = `
+        <div class="run-progress-shell" aria-label="Agentic run progress">
+            <div class="run-progress-track">
+                ${steps.map((step, index) => `
+                    ${renderRunProgressStep(step)}
+                    ${index < steps.length - 1 ? renderRunProgressConnector(step, steps[index + 1]) : ""}
+                `).join("")}
+            </div>
+        </div>
+    `;
+}
+
+function buildRunProgressSteps(events) {
+    const steps = [];
+    (events || []).forEach((event, index) => {
+        if (!event || typeof event !== "object") {
+            return;
+        }
+
+        switch (event.type) {
+        case "before-agent":
+            steps.push(createRunProgressStep(event, index, "agent", "running"));
+            break;
+        case "after-agent":
+            closeRunProgressStep(steps, event, index, "agent", "complete");
+            break;
+        case "agent-error":
+            closeRunProgressStep(steps, event, index, "agent", "failed");
+            break;
+        case "before-tool":
+            steps.push(createRunProgressStep(event, index, "tool", "running"));
+            break;
+        case "after-tool":
+            closeRunProgressStep(steps, event, index, "tool", event.failed ? "failed" : "complete");
+            break;
+        default:
+            break;
+        }
+    });
+    return steps;
+}
+
+function closeRunProgressStep(steps, event, index, kind, status) {
+    const step = findLatestOpenRunProgressStep(steps, event, kind);
+    if (step) {
+        step.status = status;
+        step.timestamp = event.timestamp || step.timestamp;
+        return;
+    }
+    steps.push(createRunProgressStep(event, index, kind, status));
+}
+
+function findLatestOpenRunProgressStep(steps, event, kind) {
+    for (let index = steps.length - 1; index >= 0; index--) {
+        const step = steps[index];
+        if (step.kind !== kind || step.status !== "running") {
+            continue;
+        }
+
+        const matches = kind === "tool"
+            ? runProgressToolMatches(step, event)
+            : runProgressAgentMatches(step, event);
+        if (matches) {
+            return step;
+        }
+    }
+    return null;
+}
+
+function runProgressAgentMatches(step, event) {
+    if (step.agentId && event.agentId) {
+        return step.agentId === event.agentId;
+    }
+    return step.name === (event.agent || event.agentId || "agent");
+}
+
+function runProgressToolMatches(step, event) {
+    if (step.toolId && event.toolId) {
+        return step.toolId === event.toolId;
+    }
+    if (step.name !== (event.tool || event.toolId || step.name)) {
+        return false;
+    }
+    return !step.agent || !event.agent || step.agent === event.agent;
+}
+
+function createRunProgressStep(event, index, kind, status) {
+    return {
+        id: `${kind}-${index}-${event.timestamp || index}`,
+        kind,
+        status,
+        name: kind === "tool" ? (event.tool || event.toolId || "tool") : (event.agent || event.agentId || "agent"),
+        agent: event.agent || "",
+        agentId: event.agentId || "",
+        toolId: event.toolId || "",
+        timestamp: event.timestamp || ""
+    };
+}
+
+function renderRunProgressStep(step) {
+    return `
+        <div
+            class="run-progress-step is-${escapeHtml(step.kind)} is-${escapeHtml(step.status)}"
+            title="${escapeHtml(runProgressStepTitle(step))}">
+            <span class="run-progress-marble" aria-hidden="true">${step.kind === "tool" ? "🛠️" : "🤖"}</span>
+            <span class="run-progress-label">${escapeHtml(step.name)}</span>
+        </div>
+    `;
+}
+
+function renderRunProgressConnector(step, nextStep) {
+    const status = step.status === "failed" || nextStep?.status === "failed"
+        ? "failed"
+        : step.status === "running" || nextStep?.status === "running"
+            ? "running"
+            : "complete";
+    return `<span class="run-progress-connector is-${status}" aria-hidden="true"></span>`;
+}
+
+function runProgressStepTitle(step) {
+    const kindLabel = step.kind === "tool" ? "Tool" : "Agent";
+    const statusLabel = step.status === "running" ? "Running" : step.status === "failed" ? "Failed" : "Completed";
+    const owner = step.kind === "tool" && step.agent ? `\nAgent: ${step.agent}` : "";
+    return `${kindLabel}: ${step.name}${owner}\nStatus: ${statusLabel}`;
+}
+
 function renderInspector() {
     const conversation = currentConversation();
     const inspection = conversation?.inspection || null;
+    renderConversationProgress(conversation);
 
     const hasInspectableInvocation = Boolean(conversation)
         && (conversation.runCount > 0 || conversation.pending || inspection);
@@ -2093,6 +2251,7 @@ async function invokeAgent() {
         const requestPayload = transcriptRequestPayload(payload);
 
         conversation.pending = true;
+        conversation.progressEvents = [];
         conversation.lastRequest = payload;
         invocationId = startPendingInvocation(conversation, requestPayload, {
             speaker,
@@ -2114,6 +2273,7 @@ async function invokeAgent() {
         conversation.pendingInvocationId = null;
         conversation.lastResponse = response;
         conversation.inspection = response.inspection || null;
+        conversation.progressEvents = response.inspection?.events || conversation.progressEvents;
         conversation.runCount += 1;
         resolvePendingInvocation(conversation, invocationId, response.result, {
             speaker,
@@ -2146,12 +2306,14 @@ async function pollInvocation(invocationId, conversation) {
 
     while (response.status === "running") {
         conversation.inspection = response.inspection || conversation.inspection;
+        conversation.progressEvents = response.inspection?.events || conversation.progressEvents;
         renderInspector();
         await delay(INVOCATION_POLL_INTERVAL_MS);
         response = await api(`/api/invocations/${encodeURIComponent(invocationId)}`, {headers: {}});
     }
 
     conversation.inspection = response.inspection || conversation.inspection;
+    conversation.progressEvents = response.inspection?.events || conversation.progressEvents;
     renderInspector();
 
     if (response.status === "failed") {
@@ -2322,6 +2484,7 @@ function freshConversation() {
         lastRequest: null,
         lastResponse: null,
         inspection: null,
+        progressEvents: [],
         pending: false,
         pendingInvocationId: null,
         runCount: 0
