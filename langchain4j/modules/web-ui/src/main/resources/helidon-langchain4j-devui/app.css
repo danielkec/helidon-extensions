@@ -388,13 +388,40 @@ body {
 
 .run-progress-track {
     display: flex;
-    align-items: flex-start;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
     width: max-content;
     min-width: max-content;
 }
 
+.run-progress-row,
+.run-progress-turn {
+    --run-progress-step-column: minmax(3.8rem, 7.2rem);
+    --run-progress-connector-column: 1.25rem;
+    display: grid;
+    grid-template-columns:
+        var(--run-progress-step-column)
+        var(--run-progress-connector-column)
+        var(--run-progress-step-column)
+        var(--run-progress-connector-column)
+        var(--run-progress-step-column);
+    width: max-content;
+}
+
+.run-progress-turn {
+    justify-items: center;
+}
+
+.run-progress-row-cell {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-width: 0;
+}
+
 .run-progress-step {
-    flex: 0 0 auto;
+    width: 100%;
     min-width: 3.8rem;
     max-width: 7.2rem;
     display: flex;
@@ -423,6 +450,10 @@ body {
 
 .run-progress-step.is-tool .run-progress-marble {
     background: linear-gradient(180deg, rgba(214, 45, 105, 0.26), rgba(59, 27, 45, 0.96));
+}
+
+.run-progress-step.is-router .run-progress-marble {
+    background: linear-gradient(180deg, rgba(120, 225, 208, 0.24), rgba(34, 72, 92, 0.96));
 }
 
 .run-progress-step.is-running .run-progress-marble {
@@ -461,21 +492,77 @@ body {
 }
 
 .run-progress-connector {
-    flex: 0 0 1.25rem;
+    position: relative;
+    display: block;
+    width: 100%;
     margin-top: 1rem;
-    border-top: 2px dotted rgba(168, 207, 240, 0.2);
+    color: rgba(168, 207, 240, 0.2);
+    border-top: 2px dotted currentColor;
+}
+
+.run-progress-row.is-forward .run-progress-connector::after,
+.run-progress-row.is-reverse .run-progress-connector::after {
+    content: "";
+    position: absolute;
+    top: -0.29rem;
+}
+
+.run-progress-row.is-forward .run-progress-connector::after {
+    right: -0.02rem;
+    border-top: 0.22rem solid transparent;
+    border-bottom: 0.22rem solid transparent;
+    border-left: 0.36rem solid currentColor;
+}
+
+.run-progress-row.is-reverse .run-progress-connector::after {
+    left: -0.02rem;
+    border-top: 0.22rem solid transparent;
+    border-bottom: 0.22rem solid transparent;
+    border-right: 0.36rem solid currentColor;
+}
+
+.run-progress-turn-line {
+    position: relative;
+    display: block;
+    justify-self: center;
+    width: 0;
+    height: 0.85rem;
+    color: rgba(168, 207, 240, 0.2);
+    border-left: 2px dotted currentColor;
+}
+
+.run-progress-turn-line::after {
+    content: "";
+    position: absolute;
+    left: -0.3rem;
+    bottom: -0.02rem;
+    border-left: 0.3rem solid transparent;
+    border-right: 0.3rem solid transparent;
+    border-top: 0.38rem solid currentColor;
 }
 
 .run-progress-connector.is-running {
-    border-top-color: rgba(209, 235, 255, 0.46);
+    color: rgba(209, 235, 255, 0.46);
 }
 
 .run-progress-connector.is-complete {
-    border-top-color: rgba(117, 215, 183, 0.34);
+    color: rgba(117, 215, 183, 0.34);
 }
 
 .run-progress-connector.is-failed {
-    border-top-color: rgba(235, 47, 91, 0.38);
+    color: rgba(235, 47, 91, 0.38);
+}
+
+.run-progress-turn-line.is-running {
+    color: rgba(209, 235, 255, 0.46);
+}
+
+.run-progress-turn-line.is-complete {
+    color: rgba(117, 215, 183, 0.34);
+}
+
+.run-progress-turn-line.is-failed {
+    color: rgba(235, 47, 91, 0.38);
 }
 
 .run-progress-empty {

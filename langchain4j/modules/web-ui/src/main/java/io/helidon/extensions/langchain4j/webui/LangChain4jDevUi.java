@@ -23,14 +23,18 @@ import java.lang.reflect.Parameter;
 import java.lang.reflect.Type;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -54,6 +58,8 @@ import io.helidon.webserver.staticcontent.StaticContentFeature;
 import dev.langchain4j.agentic.agent.MissingArgumentException;
 import dev.langchain4j.agentic.declarative.ActivationCondition;
 import dev.langchain4j.agentic.declarative.ConditionalAgent;
+import dev.langchain4j.agentic.declarative.SequenceAgent;
+import dev.langchain4j.agentic.declarative.TypedKey;
 import dev.langchain4j.agentic.internal.AgenticScopeOwner;
 import dev.langchain4j.agentic.scope.AgentInvocation;
 import dev.langchain4j.agentic.scope.AgenticScope;
@@ -62,6 +68,7 @@ import dev.langchain4j.agentic.scope.AgenticScopeRegistry;
 import dev.langchain4j.agentic.scope.DefaultAgenticScope;
 import dev.langchain4j.agentic.scope.ResultWithAgenticScope;
 import dev.langchain4j.service.MemoryId;
+import dev.langchain4j.service.ParameterNameResolver;
 import dev.langchain4j.service.V;
 
 /**
@@ -300,7 +307,10 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
 
         try (LangChain4jDevUiRecorder.Capture capture = recorder.capture()) {
             if (progressConsumer != null) {
-                capture.progressListener(progress -> progressConsumer.accept(progressInspection(normalizedInput, progress)));
+                capture.progressListener(progress -> progressConsumer.accept(progressInspection(agent,
+                                                                                              method,
+                                                                                              normalizedInput,
+                                                                                              progress)));
             }
             Object invocationResult = method.method().invoke(preparedInvocation.target(), invocationArguments);
             List<Map<String, Object>> events = capture.events();
@@ -333,7 +343,7 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
             }
 
             scopeSnapshot = enrichInspectionScope(scopeSnapshot, normalizedResult, events);
-            Map<String, Object> inspection = inspection(normalizedInput, normalizedResult, scopeSnapshot, events);
+            Map<String, Object> inspection = inspection(agent, method, normalizedInput, normalizedResult, scopeSnapshot, events);
             if (progressConsumer != null) {
                 progressConsumer.accept(inspection);
             }
@@ -349,18 +359,23 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         }
     }
 
-    private Map<String, Object> progressInspection(Map<String, Object> normalizedInput,
+    private Map<String, Object> progressInspection(AgentHandle agent,
+                                                   AgentMethodHandle method,
+                                                   Map<String, Object> normalizedInput,
                                                    LangChain4jDevUiRecorder.ProgressSnapshot progress) {
         LangChain4jDevUiRecorder.ScopeSnapshot scopeSnapshot = inspectionScope(null, progress.scopeSnapshot());
-        return inspection(normalizedInput, null, scopeSnapshot, progress.events());
+        return inspection(agent, method, normalizedInput, null, scopeSnapshot, progress.events());
     }
 
-    private Map<String, Object> inspection(Map<String, Object> input,
+    private Map<String, Object> inspection(AgentHandle agent,
+                                           AgentMethodHandle method,
+                                           Map<String, Object> input,
                                            Object result,
                                            LangChain4jDevUiRecorder.ScopeSnapshot scopeSnapshot,
-                                           List<Map<String, Object>> events) {
+                                           List<Map<String, Object>> recordedEvents) {
         LinkedHashMap<String, Object> inspection = new LinkedHashMap<>();
-        List<Map<String, Object>> invocations = inspectionInvocations(scopeSnapshot, events);
+        List<Map<String, Object>> invocations = inspectionInvocations(scopeSnapshot, recordedEvents);
+        List<Map<String, Object>> events = inspectionEvents(agent, method, input, scopeSnapshot, invocations, recordedEvents);
         inspection.put("lastUpdated", Instant.now().toString());
         inspection.put("input", input);
         inspection.put("result", result);
@@ -369,6 +384,47 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         inspection.put("invocations", invocations);
         inspection.put("events", events == null ? List.of() : List.copyOf(events));
         return inspection;
+    }
+
+    private List<Map<String, Object>> inspectionEvents(AgentHandle agent,
+                                                       AgentMethodHandle method,
+                                                       Map<String, Object> input,
+                                                       LangChain4jDevUiRecorder.ScopeSnapshot scopeSnapshot,
+                                                       List<Map<String, Object>> invocations,
+                                                       List<Map<String, Object>> recordedEvents) {
+        List<Map<String, Object>> baseEvents = recordedEvents == null ? List.of() : List.copyOf(recordedEvents);
+        List<ConditionalRoutingDescriptor> descriptors = conditionalRoutingDescriptors(agent, method, invocations, baseEvents);
+        if (descriptors.isEmpty()) {
+            return baseEvents;
+        }
+
+        Map<String, Object> evaluationState = conditionalEvaluationState(input, scopeSnapshot);
+        List<SyntheticEventGroup> groups = descriptors.stream()
+                .map(descriptor -> synthesizeConditionalRoutingEvents(descriptor, evaluationState, invocations, baseEvents))
+                .filter(group -> !group.events().isEmpty())
+                .sorted(Comparator.comparingInt(SyntheticEventGroup::anchorIndex))
+                .toList();
+        if (groups.isEmpty()) {
+            return baseEvents;
+        }
+
+        ArrayList<Map<String, Object>> merged = new ArrayList<>(baseEvents.size()
+                                                                        + groups.stream()
+                                                                                .mapToInt(group -> group.events().size())
+                                                                                .sum());
+        int groupIndex = 0;
+        for (int eventIndex = 0; eventIndex < baseEvents.size(); eventIndex++) {
+            while (groupIndex < groups.size() && groups.get(groupIndex).anchorIndex() <= eventIndex) {
+                merged.addAll(groups.get(groupIndex).events());
+                groupIndex++;
+            }
+            merged.add(baseEvents.get(eventIndex));
+        }
+        while (groupIndex < groups.size()) {
+            merged.addAll(groups.get(groupIndex).events());
+            groupIndex++;
+        }
+        return List.copyOf(merged);
     }
 
     private LangChain4jDevUiRecorder.ScopeSnapshot enrichInspectionScope(LangChain4jDevUiRecorder.ScopeSnapshot scopeSnapshot,
@@ -452,6 +508,309 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                 .filter(event -> "after-agent".equals(event.get("type")) || "agent-error".equals(event.get("type")))
                 .map(this::normalizeRecordedInvocation)
                 .toList();
+    }
+
+    private List<ConditionalRoutingDescriptor> conditionalRoutingDescriptors(AgentHandle agent,
+                                                                             AgentMethodHandle method,
+                                                                             List<Map<String, Object>> invocations,
+                                                                             List<Map<String, Object>> events) {
+        LinkedHashMap<String, ConditionalRoutingDescriptor> descriptors = new LinkedHashMap<>();
+        conditionalRoutingDescriptor(agent, method.method()).ifPresent(descriptor -> descriptors.put(descriptor.key(), descriptor));
+
+        events.stream()
+                .filter(event -> event.get("agentType") instanceof String)
+                .forEach(event -> conditionalRoutingDescriptor((String) event.get("agentType"),
+                                                               event.get("method") instanceof String methodName ? methodName : null,
+                                                               event.get("agent") instanceof String agentName ? agentName : null)
+                        .ifPresent(descriptor -> descriptors.putIfAbsent(descriptor.key(), descriptor)));
+        invocations.stream()
+                .filter(invocation -> invocation.get("agentType") instanceof String)
+                .forEach(invocation -> conditionalRoutingDescriptor((String) invocation.get("agentType"),
+                                                                    invocation.get("agentName") instanceof String agentName
+                                                                            ? agentName
+                                                                            : null,
+                                                                    null)
+                        .ifPresent(descriptor -> descriptors.putIfAbsent(descriptor.key(), descriptor)));
+        return List.copyOf(descriptors.values());
+    }
+
+    private Optional<ConditionalRoutingDescriptor> conditionalRoutingDescriptor(AgentHandle agent, Method method) {
+        if (!method.isAnnotationPresent(ConditionalAgent.class)) {
+            return Optional.empty();
+        }
+        return Optional.of(buildConditionalRoutingDescriptor(method.getDeclaringClass(), method, agent.name()));
+    }
+
+    private Optional<ConditionalRoutingDescriptor> conditionalRoutingDescriptor(String agentTypeName,
+                                                                               String methodNameHint,
+                                                                               String agentDisplayName) {
+        Optional<Class<?>> agentType = agentType(agentTypeName);
+        if (agentType.isEmpty()) {
+            return Optional.empty();
+        }
+
+        List<Method> conditionalMethods = Arrays.stream(agentType.get().getMethods())
+                .filter(LangChain4jDevUi::isInvocable)
+                .filter(method -> method.isAnnotationPresent(ConditionalAgent.class))
+                .toList();
+        if (conditionalMethods.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Optional<Method> namedMethod = conditionalMethods.stream()
+                .filter(method -> Objects.equals(conditionalAgentName(method), methodNameHint))
+                .findFirst();
+        if (namedMethod.isPresent()) {
+            return Optional.of(buildConditionalRoutingDescriptor(agentType.get(),
+                                                                 namedMethod.get(),
+                                                                 agentDisplayName == null || agentDisplayName.isBlank()
+                                                                         ? agentName(agentType.get())
+                                                                         : agentDisplayName));
+        }
+        if (conditionalMethods.size() == 1) {
+            return Optional.of(buildConditionalRoutingDescriptor(agentType.get(),
+                                                                 conditionalMethods.get(0),
+                                                                 agentDisplayName == null || agentDisplayName.isBlank()
+                                                                         ? agentName(agentType.get())
+                                                                         : agentDisplayName));
+        }
+        return Optional.empty();
+    }
+
+    private ConditionalRoutingDescriptor buildConditionalRoutingDescriptor(Class<?> agentType,
+                                                                          Method conditionalMethod,
+                                                                          String agentDisplayName) {
+        ConditionalAgent annotation = conditionalMethod.getAnnotation(ConditionalAgent.class);
+        ArrayList<ConditionalBranchDescriptor> branches = new ArrayList<>();
+        for (Class<?> subagentType : annotation.subAgents()) {
+            activationConditionMethod(agentType, subagentType).ifPresent(activationMethod -> {
+                ActivationCondition activationCondition = activationMethod.getAnnotation(ActivationCondition.class);
+                branches.add(new ConditionalBranchDescriptor(activationMethod,
+                                                             activationCondition.description(),
+                                                             subagentType.getName(),
+                                                             agentName(subagentType)));
+            });
+        }
+        return new ConditionalRoutingDescriptor(agentType.getName(),
+                                                conditionalAgentName(conditionalMethod),
+                                                agentDisplayName == null || agentDisplayName.isBlank()
+                                                        ? agentName(agentType)
+                                                        : agentDisplayName,
+                                                List.copyOf(branches));
+    }
+
+    private Optional<Method> activationConditionMethod(Class<?> agentType, Class<?> subagentType) {
+        return Arrays.stream(agentType.getMethods())
+                .filter(candidate -> Modifier.isStatic(candidate.getModifiers()))
+                .filter(candidate -> candidate.isAnnotationPresent(ActivationCondition.class))
+                .filter(candidate -> Arrays.asList(candidate.getAnnotation(ActivationCondition.class).value()).contains(subagentType))
+                .findFirst();
+    }
+
+    private String conditionalAgentName(Method method) {
+        ConditionalAgent annotation = method.getAnnotation(ConditionalAgent.class);
+        if (annotation == null || annotation.name().isBlank()) {
+            return method.getName();
+        }
+        return annotation.name();
+    }
+
+    private Optional<Class<?>> agentType(String agentTypeName) {
+        Class<?> discoveredType = agents.values().stream()
+                .map(AgentHandle::agentType)
+                .filter(agentType -> agentType.getName().equals(agentTypeName))
+                .findFirst()
+                .orElse(null);
+        if (discoveredType != null) {
+            return Optional.of(discoveredType);
+        }
+
+        try {
+            return Optional.of(Class.forName(agentTypeName));
+        } catch (ClassNotFoundException e) {
+            return Optional.empty();
+        }
+    }
+
+    private String agentName(Class<?> agentType) {
+        return agents.values().stream()
+                .filter(handle -> handle.agentType().equals(agentType))
+                .map(AgentHandle::name)
+                .findFirst()
+                .orElse(agentType.getSimpleName());
+    }
+
+    private Map<String, Object> conditionalEvaluationState(Map<String, Object> input,
+                                                           LangChain4jDevUiRecorder.ScopeSnapshot scopeSnapshot) {
+        LinkedHashMap<String, Object> state = new LinkedHashMap<>();
+        if (input != null) {
+            input.forEach((name, value) -> {
+                if (!"agenticState".equals(name)) {
+                    state.put(name, value);
+                }
+            });
+            Object injectedState = input.get("agenticState");
+            if (injectedState instanceof Map<?, ?> injectedStateMap) {
+                injectedStateMap.forEach((name, value) -> {
+                    if (name != null) {
+                        state.put(String.valueOf(name), value);
+                    }
+                });
+            }
+        }
+        if (scopeSnapshot != null) {
+            state.putAll(scopeSnapshot.state());
+        }
+        return state;
+    }
+
+    private SyntheticEventGroup synthesizeConditionalRoutingEvents(ConditionalRoutingDescriptor descriptor,
+                                                                   Map<String, Object> state,
+                                                                   List<Map<String, Object>> invocations,
+                                                                   List<Map<String, Object>> events) {
+        if (descriptor.branches().isEmpty()) {
+            return new SyntheticEventGroup(events.isEmpty() ? 0 : events.size(), List.of());
+        }
+
+        List<ConditionOutcome> outcomes = descriptor.branches().stream()
+                .map(branch -> evaluateCondition(descriptor, branch, state, invocations, events))
+                .toList();
+        boolean hasResolvedOutcome = outcomes.stream().anyMatch(outcome -> outcome.matched() != null || outcome.selected());
+        if (!hasResolvedOutcome) {
+            return new SyntheticEventGroup(events.isEmpty() ? 0 : events.size(), List.of());
+        }
+
+        String timestamp = conditionalEventTimestamp(descriptor, events);
+        ArrayList<Map<String, Object>> syntheticEvents = new ArrayList<>(outcomes.size() + 1);
+        outcomes.stream()
+                .map(outcome -> conditionalCheckEvent(descriptor, outcome, timestamp))
+                .forEach(syntheticEvents::add);
+        syntheticEvents.add(conditionalRouteEvent(descriptor, outcomes, timestamp));
+        return new SyntheticEventGroup(conditionalAnchorIndex(descriptor, events), List.copyOf(syntheticEvents));
+    }
+
+    private ConditionOutcome evaluateCondition(ConditionalRoutingDescriptor descriptor,
+                                               ConditionalBranchDescriptor branch,
+                                               Map<String, Object> state,
+                                               List<Map<String, Object>> invocations,
+                                               List<Map<String, Object>> events) {
+        boolean selectedByInvocation = selectedByInvocation(branch, invocations, events);
+        Boolean matched = selectedByInvocation ? Boolean.TRUE : evaluateCondition(branch, state, invocations);
+        return new ConditionOutcome(descriptor, branch, matched, selectedByInvocation || Boolean.TRUE.equals(matched));
+    }
+
+    private Boolean evaluateCondition(ConditionalBranchDescriptor branch,
+                                      Map<String, Object> state,
+                                      List<Map<String, Object>> invocations) {
+        try {
+            Object[] arguments = new Object[branch.activationMethod().getParameterCount()];
+            SyntheticAgenticScope scope = new SyntheticAgenticScope(state, invocations);
+            for (int index = 0; index < branch.activationMethod().getParameterCount(); index++) {
+                Parameter parameter = branch.activationMethod().getParameters()[index];
+                if (AgenticScope.class.isAssignableFrom(parameter.getType())) {
+                    arguments[index] = scope;
+                    continue;
+                }
+
+                String parameterName = ParameterNameResolver.name(parameter);
+                if (parameterName == null || !state.containsKey(parameterName)) {
+                    return null;
+                }
+                arguments[index] = LangChain4jDevUiJsonSupport.convert(state.get(parameterName),
+                                                                       branch.activationMethod().getGenericParameterTypes()[index]);
+            }
+            Object evaluation = branch.activationMethod().invoke(null, arguments);
+            return evaluation instanceof Boolean bool ? bool : null;
+        } catch (IllegalAccessException | InvocationTargetException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private boolean selectedByInvocation(ConditionalBranchDescriptor branch,
+                                         List<Map<String, Object>> invocations,
+                                         List<Map<String, Object>> events) {
+        boolean selectedByTrace = invocations.stream()
+                .anyMatch(invocation -> branch.subagentTypeName().equals(invocation.get("agentType")));
+        if (selectedByTrace) {
+            return true;
+        }
+        return events.stream()
+                .anyMatch(event -> branch.subagentTypeName().equals(event.get("agentType")));
+    }
+
+    private String conditionalEventTimestamp(ConditionalRoutingDescriptor descriptor, List<Map<String, Object>> events) {
+        return events.stream()
+                .filter(event -> conditionalRelatedEvent(descriptor, event))
+                .map(event -> event.get("timestamp"))
+                .filter(String.class::isInstance)
+                .map(String.class::cast)
+                .findFirst()
+                .orElseGet(() -> Instant.now().toString());
+    }
+
+    private int conditionalAnchorIndex(ConditionalRoutingDescriptor descriptor, List<Map<String, Object>> events) {
+        for (int index = 0; index < events.size(); index++) {
+            Map<String, Object> event = events.get(index);
+            if (descriptor.agentTypeName().equals(event.get("agentType"))
+                    && (descriptor.agentDisplayName().equals(event.get("agent"))
+                        || descriptor.methodName().equals(event.get("agent")))) {
+                return "before-agent".equals(event.get("type")) ? index + 1 : index;
+            }
+            if (descriptor.hasBranchType((String) event.get("agentType"))) {
+                return index;
+            }
+        }
+        return events.isEmpty() ? 0 : events.size();
+    }
+
+    private boolean conditionalRelatedEvent(ConditionalRoutingDescriptor descriptor, Map<String, Object> event) {
+        Object eventAgentType = event.get("agentType");
+        return Objects.equals(descriptor.agentTypeName(), eventAgentType)
+                || (eventAgentType instanceof String typeName && descriptor.hasBranchType(typeName));
+    }
+
+    private Map<String, Object> conditionalCheckEvent(ConditionalRoutingDescriptor descriptor,
+                                                      ConditionOutcome outcome,
+                                                      String timestamp) {
+        LinkedHashMap<String, Object> event = new LinkedHashMap<>();
+        event.put("timestamp", timestamp);
+        event.put("type", "conditional-check");
+        event.put("agent", descriptor.agentDisplayName());
+        event.put("agentType", descriptor.agentTypeName());
+        event.put("method", descriptor.methodName());
+        event.put("subAgent", outcome.branch().subagentName());
+        event.put("subAgentType", outcome.branch().subagentTypeName());
+        event.put("condition", outcome.branch().description());
+        event.put("matched", outcome.matched() == null ? "unknown" : outcome.matched());
+        event.put("selected", outcome.selected());
+        event.put("synthetic", true);
+        return event;
+    }
+
+    private Map<String, Object> conditionalRouteEvent(ConditionalRoutingDescriptor descriptor,
+                                                      List<ConditionOutcome> outcomes,
+                                                      String timestamp) {
+        LinkedHashMap<String, Object> event = new LinkedHashMap<>();
+        List<String> selectedAgents = outcomes.stream()
+                .filter(ConditionOutcome::selected)
+                .map(outcome -> outcome.branch().subagentName())
+                .distinct()
+                .toList();
+        List<String> selectedAgentTypes = outcomes.stream()
+                .filter(ConditionOutcome::selected)
+                .map(outcome -> outcome.branch().subagentTypeName())
+                .distinct()
+                .toList();
+        event.put("timestamp", timestamp);
+        event.put("type", "conditional-route");
+        event.put("agent", descriptor.agentDisplayName());
+        event.put("agentType", descriptor.agentTypeName());
+        event.put("method", descriptor.methodName());
+        event.put("selectedAgents", selectedAgents);
+        event.put("selectedAgentTypes", selectedAgentTypes);
+        event.put("status", selectedAgents.isEmpty() ? "no-match" : "selected");
+        event.put("synthetic", true);
+        return event;
     }
 
     private Map<String, Object> normalizeRecordedInvocation(Map<String, Object> event) {
@@ -725,11 +1084,45 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
     private static List<ParameterDescriptor> stateParameters(Class<?> agentType,
                                                              Method method,
                                                              List<ParameterDescriptor> parameters) {
-        if (!method.isAnnotationPresent(ConditionalAgent.class)) {
-            return List.of();
+        LinkedHashMap<String, ParameterDescriptor> discovered = new LinkedHashMap<>();
+        collectStateParameters(agentType, method, discovered, new HashSet<>());
+
+        parameters.stream()
+                .map(ParameterDescriptor::name)
+                .forEach(discovered::remove);
+        return List.copyOf(discovered.values());
+    }
+
+    private static void collectStateParameters(Class<?> agentType,
+                                               Method method,
+                                               Map<String, ParameterDescriptor> discovered,
+                                               Set<String> visited) {
+        String visitKey = agentType.getName() + "#" + methodId(method);
+        if (!visited.add(visitKey)) {
+            return;
         }
 
-        LinkedHashMap<String, ParameterDescriptor> discovered = new LinkedHashMap<>();
+        if (method.isAnnotationPresent(ConditionalAgent.class)) {
+            collectConditionalStateParameters(agentType, discovered);
+        }
+        if (method.isAnnotationPresent(SequenceAgent.class)) {
+            SequenceAgent annotation = method.getAnnotation(SequenceAgent.class);
+            for (Class<?> subagentType : annotation.subAgents()) {
+                collectNestedWorkflowStateParameters(subagentType, discovered, visited);
+            }
+        }
+    }
+
+    private static void collectNestedWorkflowStateParameters(Class<?> agentType,
+                                                             Map<String, ParameterDescriptor> discovered,
+                                                             Set<String> visited) {
+        Arrays.stream(agentType.getMethods())
+                .filter(LangChain4jDevUi::isInvocable)
+                .forEach(method -> collectStateParameters(agentType, method, discovered, visited));
+    }
+
+    private static void collectConditionalStateParameters(Class<?> agentType,
+                                                          Map<String, ParameterDescriptor> discovered) {
         Arrays.stream(agentType.getMethods())
                 .filter(candidate -> Modifier.isStatic(candidate.getModifiers()))
                 .filter(candidate -> candidate.isAnnotationPresent(ActivationCondition.class))
@@ -739,11 +1132,6 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                                                                    index))
                         .filter(Objects::nonNull)
                         .forEach(descriptor -> discovered.putIfAbsent(descriptor.name(), descriptor)));
-
-        parameters.stream()
-                .map(ParameterDescriptor::name)
-                .forEach(discovered::remove);
-        return List.copyOf(discovered.values());
     }
 
     private static ParameterDescriptor stateParameterDescriptor(Parameter parameter, Type parameterType, int index) {
@@ -773,12 +1161,172 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                 .toList();
     }
 
+    private record ConditionalRoutingDescriptor(String agentTypeName,
+                                                String methodName,
+                                                String agentDisplayName,
+                                                List<ConditionalBranchDescriptor> branches) {
+        private String key() {
+            return agentTypeName + "#" + methodName;
+        }
+
+        private boolean hasBranchType(String agentTypeName) {
+            return branches.stream().anyMatch(branch -> branch.subagentTypeName().equals(agentTypeName));
+        }
+    }
+
+    private record ConditionalBranchDescriptor(Method activationMethod,
+                                               String description,
+                                               String subagentTypeName,
+                                               String subagentName) {
+    }
+
+    private record ConditionOutcome(ConditionalRoutingDescriptor descriptor,
+                                    ConditionalBranchDescriptor branch,
+                                    Boolean matched,
+                                    boolean selected) {
+    }
+
+    private record SyntheticEventGroup(int anchorIndex, List<Map<String, Object>> events) {
+    }
+
+    private static final class SyntheticAgenticScope implements AgenticScope {
+        private final Map<String, Object> state;
+        private final List<AgentInvocation> invocations;
+
+        private SyntheticAgenticScope(Map<String, Object> state, List<Map<String, Object>> normalizedInvocations) {
+            this.state = new HashMap<>(state);
+            this.invocations = normalizedInvocations.stream()
+                    .map(SyntheticAgenticScope::toAgentInvocation)
+                    .toList();
+        }
+
+        @Override
+        public Object memoryId() {
+            return null;
+        }
+
+        @Override
+        public void writeState(String key, Object value) {
+            if (value == null) {
+                state.remove(key);
+            } else {
+                state.put(key, value);
+            }
+        }
+
+        @Override
+        public <T> void writeState(Class<? extends TypedKey<T>> key, T value) {
+            writeState(key.getSimpleName(), value);
+        }
+
+        @Override
+        public void writeStates(Map<String, Object> newState) {
+            state.putAll(newState);
+        }
+
+        @Override
+        public boolean hasState(String key) {
+            return state.containsKey(key);
+        }
+
+        @Override
+        public boolean hasState(Class<? extends TypedKey<?>> key) {
+            return hasState(key.getSimpleName());
+        }
+
+        @Override
+        public Object readState(String key) {
+            return state.get(key);
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <T> T readState(String key, T defaultValue) {
+            Object value = state.get(key);
+            if (value == null) {
+                return defaultValue;
+            }
+            if (defaultValue == null) {
+                return (T) value;
+            }
+            try {
+                return (T) LangChain4jDevUiJsonSupport.convert(value, defaultValue.getClass());
+            } catch (RuntimeException e) {
+                return (T) value;
+            }
+        }
+
+        @Override
+        public <T> T readState(Class<? extends TypedKey<T>> key) {
+            return readState(key.getSimpleName(), null);
+        }
+
+        @Override
+        public Map<String, Object> state() {
+            return Collections.unmodifiableMap(state);
+        }
+
+        @Override
+        public String contextAsConversation(String... agentNames) {
+            return "";
+        }
+
+        @Override
+        public String contextAsConversation(Object... agents) {
+            return "";
+        }
+
+        @Override
+        public List<AgentInvocation> agentInvocations() {
+            return invocations;
+        }
+
+        @Override
+        public List<AgentInvocation> agentInvocations(String agentName) {
+            return invocations.stream()
+                    .filter(invocation -> invocation.agentName().equals(agentName))
+                    .toList();
+        }
+
+        @Override
+        public List<AgentInvocation> agentInvocations(Class<?> agentType) {
+            return invocations.stream()
+                    .filter(invocation -> invocation.agentType().equals(agentType))
+                    .toList();
+        }
+
+        @SuppressWarnings("unchecked")
+        private static AgentInvocation toAgentInvocation(Map<String, Object> normalizedInvocation) {
+            Class<?> agentType = normalizedInvocation.get("agentType") instanceof String agentTypeName
+                    ? resolveClass(agentTypeName)
+                    : Object.class;
+            Map<String, Object> input = normalizedInvocation.get("input") instanceof Map<?, ?> normalizedInput
+                    ? (Map<String, Object>) normalizedInput
+                    : Map.of();
+            return new AgentInvocation(agentType,
+                                       String.valueOf(normalizedInvocation.getOrDefault("agentName", "agent")),
+                                       String.valueOf(normalizedInvocation.getOrDefault("agentId", "")),
+                                       input,
+                                       normalizedInvocation.get("output"));
+        }
+
+        private static Class<?> resolveClass(String typeName) {
+            try {
+                return Class.forName(typeName);
+            } catch (ClassNotFoundException e) {
+                return Object.class;
+            }
+        }
+    }
+
     private static final class AgentHandle {
+        private final Class<?> agentType;
         private final AgentDescriptor descriptor;
         private final Object service;
         private final Map<String, AgentMethodHandle> methods;
 
         private AgentHandle(AgentMetadata metadata, ServiceRegistry registry) {
+            this.agentType = metadata.agentClass();
             this.descriptor = new AgentDescriptor(metadata.agentName(),
                                                   metadata.agentClass().getName(),
                                                   metadata.buildTimeConfig().description().orElse(null),
@@ -828,6 +1376,10 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
 
         private String name() {
             return descriptor.name();
+        }
+
+        private Class<?> agentType() {
+            return agentType;
         }
 
         private Map<String, Object> apiView() {

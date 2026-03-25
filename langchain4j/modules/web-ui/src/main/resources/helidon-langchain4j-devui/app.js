@@ -403,17 +403,22 @@ function renderConversationProgress(conversation = currentConversation()) {
         return;
     }
 
+    const rows = buildRunProgressRows(steps);
     conversationProgress.innerHTML = `
         <div class="run-progress-shell" aria-label="Agentic run progress">
             <div class="run-progress-track">
-                ${steps.map((step, index) => `
-                    ${renderRunProgressStep(step)}
-                    ${index < steps.length - 1 ? renderRunProgressConnector(step, steps[index + 1]) : ""}
+                ${rows.map((row, rowIndex) => `
+                    ${rowIndex > 0 ? renderRunProgressTurn(rows[rowIndex - 1], row) : ""}
+                    ${renderRunProgressRow(row)}
                 `).join("")}
             </div>
         </div>
     `;
 }
+
+const RUN_PROGRESS_ROW_SIZE = 3;
+const RUN_PROGRESS_STEP_COLUMNS = [1, 3, 5];
+const RUN_PROGRESS_CONNECTOR_COLUMNS = [2, 4];
 
 function buildRunProgressSteps(events) {
     const steps = [];
@@ -426,11 +431,19 @@ function buildRunProgressSteps(events) {
         case "before-agent":
             steps.push(createRunProgressStep(event, index, "agent", "running"));
             break;
+        case "conditional-check":
+            if (!findLatestOpenRunProgressStep(steps, event, "router")) {
+                steps.push(createRunProgressStep(event, index, "router", "running"));
+            }
+            break;
         case "after-agent":
             closeRunProgressStep(steps, event, index, "agent", "complete");
             break;
         case "agent-error":
             closeRunProgressStep(steps, event, index, "agent", "failed");
+            break;
+        case "conditional-route":
+            closeRunProgressStep(steps, event, index, "router", event.status === "no-match" ? "failed" : "complete");
             break;
         case "before-tool":
             steps.push(createRunProgressStep(event, index, "tool", "running"));
@@ -443,6 +456,52 @@ function buildRunProgressSteps(events) {
         }
     });
     return steps;
+}
+
+function buildRunProgressRows(steps, rowSize = RUN_PROGRESS_ROW_SIZE) {
+    const rows = [];
+    for (let start = 0; start < steps.length; start += rowSize) {
+        rows.push(createRunProgressRow(steps.slice(start, start + rowSize), rows.length));
+    }
+    return rows;
+}
+
+function createRunProgressRow(logicalSteps, rowIndex) {
+    const reverse = rowIndex % 2 === 1;
+    const items = [];
+
+    logicalSteps.forEach((step, logicalIndex) => {
+        const stepColumnIndex = reverse
+            ? RUN_PROGRESS_ROW_SIZE - 1 - logicalIndex
+            : logicalIndex;
+        items.push({
+            type: "step",
+            column: RUN_PROGRESS_STEP_COLUMNS[stepColumnIndex],
+            step
+        });
+
+        if (logicalIndex >= logicalSteps.length - 1) {
+            return;
+        }
+        const connectorColumnIndex = reverse
+            ? RUN_PROGRESS_ROW_SIZE - 2 - logicalIndex
+            : logicalIndex;
+        items.push({
+            type: "connector",
+            column: RUN_PROGRESS_CONNECTOR_COLUMNS[connectorColumnIndex],
+            from: step,
+            to: logicalSteps[logicalIndex + 1]
+        });
+    });
+
+    items.sort((left, right) => left.column - right.column);
+    return {
+        reverse,
+        logicalSteps,
+        startStep: logicalSteps[0],
+        endStep: logicalSteps[logicalSteps.length - 1],
+        items
+    };
 }
 
 function closeRunProgressStep(steps, event, index, kind, status) {
@@ -464,7 +523,9 @@ function findLatestOpenRunProgressStep(steps, event, kind) {
 
         const matches = kind === "tool"
             ? runProgressToolMatches(step, event)
-            : runProgressAgentMatches(step, event);
+            : kind === "router"
+                ? runProgressRouterMatches(step, event)
+                : runProgressAgentMatches(step, event);
         if (matches) {
             return step;
         }
@@ -489,17 +550,59 @@ function runProgressToolMatches(step, event) {
     return !step.agent || !event.agent || step.agent === event.agent;
 }
 
+function runProgressRouterMatches(step, event) {
+    const eventRouterKey = runProgressRouterKey(event);
+    if (step.routerKey && eventRouterKey) {
+        return step.routerKey === eventRouterKey;
+    }
+    if (step.agentType && event.agentType && step.agentType !== event.agentType) {
+        return false;
+    }
+    return step.name === runProgressStepName(event, "router");
+}
+
 function createRunProgressStep(event, index, kind, status) {
     return {
         id: `${kind}-${index}-${event.timestamp || index}`,
         kind,
         status,
-        name: kind === "tool" ? (event.tool || event.toolId || "tool") : (event.agent || event.agentId || "agent"),
+        name: runProgressStepName(event, kind),
         agent: event.agent || "",
         agentId: event.agentId || "",
+        agentType: event.agentType || "",
+        method: event.method || "",
         toolId: event.toolId || "",
+        routerKey: kind === "router" ? runProgressRouterKey(event) : "",
         timestamp: event.timestamp || ""
     };
+}
+
+function runProgressStepName(event, kind) {
+    if (kind === "tool") {
+        return event.tool || event.toolId || "tool";
+    }
+    if (kind === "router") {
+        return event.agent || shortTypeName(event.agentType) || "router";
+    }
+    return event.agent || event.agentId || "agent";
+}
+
+function runProgressRouterKey(event) {
+    const method = event.method || event.agent || "";
+    const agentType = event.agentType || "";
+    if (!method && !agentType) {
+        return "";
+    }
+    return `${agentType}::${method}`;
+}
+
+function shortTypeName(typeName) {
+    const normalized = String(typeName || "").trim();
+    if (!normalized) {
+        return "";
+    }
+    const separator = normalized.lastIndexOf(".");
+    return separator === -1 ? normalized : normalized.slice(separator + 1);
 }
 
 function renderRunProgressStep(step) {
@@ -507,26 +610,86 @@ function renderRunProgressStep(step) {
         <div
             class="run-progress-step is-${escapeHtml(step.kind)} is-${escapeHtml(step.status)}"
             title="${escapeHtml(runProgressStepTitle(step))}">
-            <span class="run-progress-marble" aria-hidden="true">${step.kind === "tool" ? "🛠️" : "🤖"}</span>
+            <span class="run-progress-marble" aria-hidden="true">${runProgressStepIcon(step)}</span>
             <span class="run-progress-label">${escapeHtml(step.name)}</span>
         </div>
     `;
 }
 
+function runProgressStepIcon(step) {
+    if (step.kind === "tool") {
+        return "🛠️";
+    }
+    if (step.kind === "router") {
+        return "🧭";
+    }
+    return "🤖";
+}
+
 function renderRunProgressConnector(step, nextStep) {
-    const status = step.status === "failed" || nextStep?.status === "failed"
+    const status = runProgressConnectorStatus(step, nextStep);
+    return `<span class="run-progress-connector is-${status}" aria-hidden="true"></span>`;
+}
+
+function runProgressConnectorStatus(step, nextStep) {
+    return step.status === "failed" || nextStep?.status === "failed"
         ? "failed"
         : step.status === "running" || nextStep?.status === "running"
             ? "running"
             : "complete";
-    return `<span class="run-progress-connector is-${status}" aria-hidden="true"></span>`;
+}
+
+function renderRunProgressRow(row) {
+    return `
+        <div class="run-progress-row ${row.reverse ? "is-reverse" : "is-forward"}">
+            ${row.items.map((item) => item.type === "step"
+                ? renderRunProgressRowStep(item)
+                : renderRunProgressRowConnector(item)
+            ).join("")}
+        </div>
+    `;
+}
+
+function renderRunProgressRowStep(item) {
+    return `
+        <div class="run-progress-row-cell is-step" style="grid-column:${item.column}">
+            ${renderRunProgressStep(item.step)}
+        </div>
+    `;
+}
+
+function renderRunProgressRowConnector(item) {
+    return `
+        <div class="run-progress-row-cell is-connector" style="grid-column:${item.column}">
+            ${renderRunProgressConnector(item.from, item.to)}
+        </div>
+    `;
+}
+
+function renderRunProgressTurn(previousRow, nextRow) {
+    const sideClass = previousRow.reverse ? "is-left" : "is-right";
+    const status = runProgressConnectorStatus(previousRow.endStep, nextRow.startStep);
+    const column = previousRow.reverse ? 1 : 5;
+    return `
+        <div class="run-progress-turn ${sideClass}">
+            <span
+                class="run-progress-turn-line is-${status}"
+                style="grid-column:${column}"
+                aria-hidden="true"></span>
+        </div>
+    `;
 }
 
 function runProgressStepTitle(step) {
-    const kindLabel = step.kind === "tool" ? "Tool" : "Agent";
+    const kindLabel = step.kind === "tool"
+        ? "Tool"
+        : step.kind === "router"
+            ? "Conditional agent"
+            : "Agent";
     const statusLabel = step.status === "running" ? "Running" : step.status === "failed" ? "Failed" : "Completed";
     const owner = step.kind === "tool" && step.agent ? `\nAgent: ${step.agent}` : "";
-    return `${kindLabel}: ${step.name}${owner}\nStatus: ${statusLabel}`;
+    const method = step.kind === "router" && step.method ? `\nMethod: ${step.method}` : "";
+    return `${kindLabel}: ${step.name}${owner}${method}\nStatus: ${statusLabel}`;
 }
 
 function renderInspector() {

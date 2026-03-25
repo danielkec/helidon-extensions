@@ -171,6 +171,79 @@ class LangChain4jDevUiTest {
         Map<String, Object> state = (Map<String, Object>) inspection.get("state");
         assertThat(state.get("flavor"), equalTo("SE"));
         assertThat(inspection.get("invocations"), instanceOf(List.class));
+        assertThat(inspection.get("events"), instanceOf(List.class));
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> events = (List<Map<String, Object>>) inspection.get("events");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> seCheck = events.stream()
+                .filter(event -> "conditional-check".equals(event.get("type")))
+                .filter(event -> "browser-se-expert".equals(event.get("subAgent")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(seCheck.get("agent"), equalTo("browser-flavor-router"));
+        assertThat(seCheck.get("method"), equalTo("askExpert"));
+        assertThat(seCheck.get("matched"), equalTo(true));
+        assertThat(seCheck.get("selected"), equalTo(true));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> mpCheck = events.stream()
+                .filter(event -> "conditional-check".equals(event.get("type")))
+                .filter(event -> "browser-mp-expert".equals(event.get("subAgent")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(mpCheck.get("matched"), equalTo(false));
+        assertThat(mpCheck.get("selected"), equalTo(false));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> route = events.stream()
+                .filter(event -> "conditional-route".equals(event.get("type")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(route.get("agent"), equalTo("browser-flavor-router"));
+        assertThat(route.get("method"), equalTo("askExpert"));
+        assertThat(route.get("status"), equalTo("selected"));
+        assertThat((List<?>) route.get("selectedAgents"), equalTo(List.of("browser-se-expert")));
+    }
+
+    @Test
+    void exposesNestedConditionalRouterEventsFromInvocationTrace() {
+        LinkedHashMap<String, Object> invokeRequest = new LinkedHashMap<>();
+        invokeRequest.put("agent", "browser-routed-workflow");
+        invokeRequest.put("method", "ask(String)");
+        invokeRequest.put("arguments", Map.of("question", "Need SE guidance"));
+        invokeRequest.put("state", Map.of("flavor", "SE"));
+
+        ClientResponseTyped<String> invokeResponse = client.post("/langchain4j/ui/api/invoke")
+                .submit(JSONB.toJson(invokeRequest), String.class);
+
+        if (invokeResponse.status() != Status.OK_200) {
+            throw new AssertionError("nested-router-response=" + invokeResponse.entity());
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> invoked = JSONB.fromJson(invokeResponse.entity(), LinkedHashMap.class);
+        assertThat(invoked.get("result"), equalTo("Echo: SE expert: Need SE guidance"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> inspection = (Map<String, Object>) invoked.get("inspection");
+        assertThat(inspection, notNullValue());
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> invocations = (List<Map<String, Object>>) inspection.get("invocations");
+        assertThat(invocations.stream()
+                           .map(invocation -> invocation.get("agentType"))
+                           .toList(),
+                   hasItem(BrowserFlavorRouterAgent.class.getName()));
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> events = (List<Map<String, Object>>) inspection.get("events");
+        int routeIndex = indexOfEvent(events, event -> "conditional-route".equals(event.get("type"))
+                && "browser-flavor-router".equals(event.get("agent")));
+        int expertIndex = indexOfEvent(events, event -> "before-agent".equals(event.get("type"))
+                && "browser-se-expert".equals(event.get("agent")));
+        assertThat(routeIndex, greaterThan(-1));
+        assertThat(expertIndex, greaterThan(-1));
+        assertThat(routeIndex < expertIndex, is(true));
     }
 
     @Test
@@ -313,5 +386,15 @@ class LangChain4jDevUiTest {
             Thread.sleep(25);
         }
         throw new AssertionError("Invocation did not reach expected state: " + latest);
+    }
+
+    private static int indexOfEvent(List<Map<String, Object>> events,
+                                    java.util.function.Predicate<Map<String, Object>> predicate) {
+        for (int index = 0; index < events.size(); index++) {
+            if (predicate.test(events.get(index))) {
+                return index;
+            }
+        }
+        return -1;
     }
 }

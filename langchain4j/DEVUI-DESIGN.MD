@@ -151,6 +151,7 @@ Recorder captures:
 - invocation errors
 - before/after tool execution
 - scope creation/destruction
+- synthetic conditional-routing events derived from `@ActivationCondition` metadata, available scope state, and invocation trace so routers expose branch checks and selected sub-agents even though upstream listener callbacks do not fire for activation-condition evaluation
 
 The recorder is invocation-scoped rather than session-scoped:
 
@@ -216,7 +217,7 @@ UI capabilities:
 - support consistent keyboard invocation shortcuts across agents and forms, with explicit multiline-editor shortcuts where needed
 - show an in-flight progress bubble and a visually active run/send button while the UI is waiting for an agent response
 - refresh the inspector dynamically while a workflow is running so events and trace details appear progressively in the browser
-- show a live agentic-run progress strip in the conversation header, deriving agent and tool marbles from the event stream with dotted connectors, small name labels, and pulsing in-flight steps until matching completion events arrive
+- show a live agentic-run progress strip in the conversation header, deriving agent, conditional-router, and tool marbles from the event stream with centered directional connector arrows, small name labels, and pulsing in-flight steps until matching completion events arrive, wrapping long workflows into alternating 3-step snake rows instead of a single overflowing line
 - render object-shaped input and output payloads inside chat bubbles as named variable bullets, with string values interpreted as markdown
 - handle indented markdown blocks inside bubble values, including fenced code blocks emitted under list items and markdown tables
 - syntax-highlight fenced markdown code blocks in the browser, with built-in support for Java, JSON, YAML, XML, and bash without adding a frontend toolchain
@@ -246,6 +247,7 @@ Add tests in the new module covering:
 - agents endpoint lists generated agents
 - invoke endpoint calls an agent successfully
 - conditional-agent state inputs are surfaced and applied
+- conditional routers expose synthetic routing events for branch checks and selected sub-agents, including nested conditional agents discovered from invocation trace inside sequence workflows
 - latest invocation inspection contains trace and events
 - async invocation polling exposes live progress before workflow completion
 - legacy session routes are not exposed
