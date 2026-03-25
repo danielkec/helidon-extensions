@@ -23,22 +23,17 @@
 
 <main class="layout">
     <aside class="panel rail">
-        <section class="panel-section">
-            <div class="section-head">
-                <h2>Agents</h2>
-                <button class="ghost-button" id="refresh-agents" type="button">Refresh</button>
-            </div>
-            <div class="list-stack" id="agent-list"></div>
+        <section class="panel-section panel-section-graph">
+            <div class="agent-graph" id="agent-list"></div>
         </section>
     </aside>
 
-    <section class="panel workspace">
-        <div class="workspace-head">
-            <div>
-                <p class="eyebrow">Interactive Agent Run</p>
-                <h2 id="workspace-title">Select an agent</h2>
-            </div>
-            <div class="method-picker">
+        <section class="panel workspace">
+            <div class="workspace-head">
+                <div>
+                    <h2 id="workspace-title">Select an agent</h2>
+                </div>
+                <div class="method-picker">
                 <label for="method-select">Method</label>
                 <select id="method-select"></select>
             </div>

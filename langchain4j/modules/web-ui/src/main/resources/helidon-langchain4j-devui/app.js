@@ -6,6 +6,19 @@ const state = {
 };
 
 const INVOCATION_POLL_INTERVAL_MS = 180;
+const AGENT_GRAPH_LAYOUT = Object.freeze({
+    paddingX: 18,
+    paddingY: 18,
+    columnGap: 20,
+    rowGap: 86,
+    nameWidthCharLimit: 35,
+    agentMinWidth: 162,
+    agentMaxWidth: 330,
+    agentHeight: 84,
+    toolMinWidth: 148,
+    toolMaxWidth: 312,
+    toolHeight: 60
+});
 
 const basePath = (() => {
     const path = window.location.pathname;
@@ -16,6 +29,7 @@ const basePath = (() => {
 })();
 
 const agentList = document.getElementById("agent-list");
+const refreshAgentsButton = document.getElementById("refresh-agents");
 const methodSelect = document.getElementById("method-select");
 const invokeForm = document.getElementById("invoke-form");
 const workspaceTitle = document.getElementById("workspace-title");
@@ -141,7 +155,9 @@ const BASH_COMMAND_SEPARATOR_OPERATORS = new Set(["&&", "||", "|", "|&", ";", ";
 const YAML_BOOLEAN_LITERALS = new Set(["false", "no", "off", "on", "true", "yes"]);
 const YAML_NULL_LITERALS = new Set(["null", "~"]);
 
-document.getElementById("refresh-agents").addEventListener("click", loadAgents);
+if (refreshAgentsButton) {
+    refreshAgentsButton.addEventListener("click", loadAgents);
+}
 clearConversationButton.addEventListener("click", clearConversation);
 invokeForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -239,22 +255,524 @@ function renderAgents() {
         return;
     }
 
-    agentList.innerHTML = state.agents.map((agent) => {
-        const active = state.selectedAgent?.name === agent.name ? "is-active" : "";
-        return `
-            <div class="list-card ${active}">
-                <button type="button" data-agent="${escapeHtml(agent.name)}">
-                    <div class="list-title">${escapeHtml(agent.name)}</div>
-                    <div class="list-meta">${escapeHtml(agent.interfaceName)}</div>
-                    <div class="list-meta">${agent.methods.length} method${agent.methods.length === 1 ? "" : "s"}</div>
-                </button>
-            </div>
-        `;
-    }).join("");
+    const graph = buildAgentGraph(state.agents);
+    agentList.innerHTML = renderAgentGraph(graph);
 
     agentList.querySelectorAll("button[data-agent]").forEach((button) => {
         button.addEventListener("click", () => selectAgent(button.dataset.agent));
     });
+}
+
+function buildAgentGraph(agents) {
+    const selectedAgentKey = state.selectedAgent ? agentGraphAgentKey(state.selectedAgent.name) : "";
+    const nodesByKey = new Map();
+    const edgesByKey = new Map();
+
+    (agents || []).forEach((agent) => {
+        const node = createAgentGraphAgentNode(agent, selectedAgentKey);
+        nodesByKey.set(node.key, node);
+    });
+
+    (agents || []).forEach((agent) => {
+        const sourceKey = agentGraphAgentKey(agent.name);
+
+        (agent.relations || []).forEach((relation) => {
+            const targetName = relation.targetAgent || shortTypeName(relation.targetTypeName) || "agent";
+            const targetKey = agentGraphAgentKey(targetName);
+            if (!nodesByKey.has(targetKey)) {
+                nodesByKey.set(targetKey, createAgentGraphPlaceholderNode(targetName,
+                                                                          relation.targetTypeName || "",
+                                                                          relation.kind || "agent"));
+            }
+
+            const edgeKey = `agent-edge::${sourceKey}::${relation.kind || "sequence"}::${relation.method || ""}::${targetKey}`;
+            if (!edgesByKey.has(edgeKey)) {
+                edgesByKey.set(edgeKey, {
+                    key: edgeKey,
+                    sourceKey,
+                    targetKey,
+                    kind: relation.kind || "sequence",
+                    label: relation.method || "",
+                    detail: relation.description || ""
+                });
+            }
+        });
+
+        (agent.tools || []).forEach((tool) => {
+            const toolNode = createAgentGraphToolNode(tool);
+            if (!nodesByKey.has(toolNode.key)) {
+                nodesByKey.set(toolNode.key, toolNode);
+            }
+
+            const edgeKey = `tool-edge::${sourceKey}::${toolNode.key}`;
+            if (!edgesByKey.has(edgeKey)) {
+                edgesByKey.set(edgeKey, {
+                    key: edgeKey,
+                    sourceKey,
+                    targetKey: toolNode.key,
+                    kind: "tool",
+                    label: tool.owner || tool.kind || "tool",
+                    detail: tool.description || ""
+                });
+            }
+        });
+    });
+
+    return layoutAgentGraph({
+        nodes: Array.from(nodesByKey.values()),
+        edges: Array.from(edgesByKey.values()),
+        selectedAgentKey
+    });
+}
+
+function createAgentGraphAgentNode(agent, selectedAgentKey) {
+    const width = agentGraphNodeWidth("agent", agent.name);
+    const meta = agentGraphAgentMeta(agent);
+    return {
+        key: agentGraphAgentKey(agent.name),
+        nodeKind: "agent",
+        category: agent.kind || "agent",
+        name: agent.name,
+        meta,
+        detail: agent.description || agent.interfaceName || "",
+        width,
+        height: agentGraphNodeHeight("agent", width, agent.name, meta),
+        selectable: true,
+        active: agentGraphAgentKey(agent.name) === selectedAgentKey
+    };
+}
+
+function createAgentGraphPlaceholderNode(name, typeName, relationKind) {
+    const width = agentGraphNodeWidth("agent", name);
+    const meta = "Referenced agent";
+    return {
+        key: agentGraphAgentKey(name),
+        nodeKind: "agent",
+        category: relationKind === "conditional" ? "router" : "agent",
+        name,
+        meta,
+        detail: typeName || name,
+        width,
+        height: agentGraphNodeHeight("agent", width, name, meta),
+        selectable: false,
+        active: false
+    };
+}
+
+function createAgentGraphToolNode(tool) {
+    const kind = tool.kind || "tool";
+    const name = tool.name || "tool";
+    const width = agentGraphNodeWidth("tool", name);
+    const meta = agentGraphToolMeta(tool);
+    return {
+        key: tool.key || `${kind}::${name}`,
+        nodeKind: "tool",
+        category: kind,
+        name,
+        meta,
+        detail: tool.description || tool.typeName || tool.owner || "",
+        width,
+        height: agentGraphNodeHeight("tool", width, name, meta),
+        selectable: false,
+        active: false
+    };
+}
+
+function agentGraphAgentKey(name) {
+    return `agent::${name}`;
+}
+
+function agentGraphAgentMeta(agent) {
+    const summary = [
+        `${agent.methods?.length || 0} method${(agent.methods?.length || 0) === 1 ? "" : "s"}`
+    ];
+    if ((agent.relations || []).length > 0) {
+        summary.push(`${agent.relations.length} link${agent.relations.length === 1 ? "" : "s"}`);
+    }
+    if ((agent.tools || []).length > 0) {
+        summary.push(`${agent.tools.length} tool${agent.tools.length === 1 ? "" : "s"}`);
+    }
+    return summary.join(" • ");
+}
+
+function agentGraphKindLabel(kind) {
+    if (kind === "router") {
+        return "Conditional agent";
+    }
+    if (kind === "workflow") {
+        return "Workflow agent";
+    }
+    return "Agent";
+}
+
+function agentGraphToolMeta(tool) {
+    if (tool.kind === "mcp-client") {
+        return "MCP client";
+    }
+    if (tool.kind === "tool-provider") {
+        return "Tool provider";
+    }
+    return tool.owner || "Tool";
+}
+
+function agentGraphNodeHeight(nodeKind, width, name, meta) {
+    const labelFontSize = nodeKind === "tool" ? 13.2 : 13.8;
+    const metaFontSize = 10.2;
+    const lineWidth = Math.max(56, width - 22);
+    const labelLines = estimateAgentGraphWrappedLines(name, lineWidth, labelFontSize, 0.57);
+    const metaLines = meta ? estimateAgentGraphWrappedLines(meta, lineWidth, metaFontSize, 0.56) : 0;
+    const topLineHeight = 20;
+    const labelHeight = labelLines * 15.2;
+    const metaHeight = metaLines * 11.8;
+    const spacing = 18 + 4 + (metaLines > 0 ? 3 : 0);
+    const computed = topLineHeight + labelHeight + metaHeight + spacing;
+    return Math.max(nodeKind === "tool" ? AGENT_GRAPH_LAYOUT.toolHeight : AGENT_GRAPH_LAYOUT.agentHeight,
+                    Math.ceil(computed));
+}
+
+function agentGraphNodeWidth(nodeKind, name) {
+    const labelFontSize = nodeKind === "tool" ? 13.2 : 13.8;
+    const widthFactor = 0.57;
+    const paddingAllowance = nodeKind === "tool" ? 42 : 46;
+    const displayChars = Math.min(agentGraphDisplayNameLength(name), AGENT_GRAPH_LAYOUT.nameWidthCharLimit);
+    const computed = Math.ceil(displayChars * labelFontSize * widthFactor + paddingAllowance);
+    const minWidth = nodeKind === "tool" ? AGENT_GRAPH_LAYOUT.toolMinWidth : AGENT_GRAPH_LAYOUT.agentMinWidth;
+    const maxWidth = nodeKind === "tool" ? AGENT_GRAPH_LAYOUT.toolMaxWidth : AGENT_GRAPH_LAYOUT.agentMaxWidth;
+    return clamp(computed, minWidth, maxWidth);
+}
+
+function agentGraphDisplayNameLength(name) {
+    return Math.max(...String(name || "")
+        .split(/\r?\n/)
+        .map((line) => Math.max(1, line.trim().length)), 1);
+}
+
+function estimateAgentGraphWrappedLines(text, lineWidth, fontSize, charWidthFactor) {
+    const normalized = String(text || "");
+    if (!normalized) {
+        return 0;
+    }
+    const averageCharWidth = Math.max(5.2, fontSize * charWidthFactor);
+    const charsPerLine = Math.max(4, Math.floor(lineWidth / averageCharWidth));
+    return normalized.split(/\r?\n/).reduce((lineCount, line) => {
+        return lineCount + Math.max(1, Math.ceil(line.length / charsPerLine));
+    }, 0);
+}
+
+function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+}
+
+function layoutAgentGraph(graph) {
+    const nodes = graph.nodes || [];
+    const edges = graph.edges || [];
+    const nodesByKey = new Map(nodes.map((node) => [node.key, node]));
+    const workflowEdges = edges.filter((edge) => edge.kind === "sequence" || edge.kind === "conditional");
+    const depthByKey = computeAgentGraphDepths(nodes, workflowEdges);
+
+    const incomingByKey = new Map(nodes.map((node) => [node.key, []]));
+    edges.forEach((edge) => {
+        if (incomingByKey.has(edge.targetKey)) {
+            incomingByKey.get(edge.targetKey).push(edge.sourceKey);
+        }
+    });
+
+    nodes.filter((node) => node.nodeKind === "tool").forEach((node) => {
+        const parents = incomingByKey.get(node.key) || [];
+        const depth = parents.reduce((maxDepth, parentKey) => Math.max(maxDepth, depthByKey.get(parentKey) ?? 0), 0);
+        depthByKey.set(node.key, depth + 1);
+    });
+
+    const layers = new Map();
+    nodes.forEach((node) => {
+        const depth = depthByKey.get(node.key) ?? 0;
+        if (!layers.has(depth)) {
+            layers.set(depth, []);
+        }
+        layers.get(depth).push(node);
+    });
+
+    const layerOrderHints = new Map();
+    const orderedLayers = Array.from(layers.entries())
+        .sort((left, right) => left[0] - right[0])
+        .map(([depth, layerNodes]) => {
+            const ordered = layerNodes.slice().sort((left, right) => {
+                const leftBarycenter = agentGraphNodeBarycenter(left, incomingByKey, layerOrderHints);
+                const rightBarycenter = agentGraphNodeBarycenter(right, incomingByKey, layerOrderHints);
+                const leftFinite = Number.isFinite(leftBarycenter);
+                const rightFinite = Number.isFinite(rightBarycenter);
+                if (leftFinite && rightFinite && leftBarycenter !== rightBarycenter) {
+                    return leftBarycenter - rightBarycenter;
+                }
+                if (leftFinite !== rightFinite) {
+                    return leftFinite ? -1 : 1;
+                }
+                if (left.nodeKind !== right.nodeKind) {
+                    return left.nodeKind === "agent" ? -1 : 1;
+                }
+                return left.name.localeCompare(right.name);
+            });
+
+            ordered.forEach((node, index) => {
+                layerOrderHints.set(node.key, index);
+            });
+
+            const width = ordered.reduce((sum, node, index) => sum + node.width + (index > 0 ? AGENT_GRAPH_LAYOUT.columnGap : 0), 0);
+            const height = ordered.reduce((maxHeight, node) => Math.max(maxHeight, node.height), 0);
+            return {depth, nodes: ordered, width, height};
+        });
+
+    const widestLayer = orderedLayers.reduce((maxWidth, layer) => Math.max(maxWidth, layer.width), 0);
+    const graphWidth = Math.max(AGENT_GRAPH_LAYOUT.agentMinWidth + AGENT_GRAPH_LAYOUT.paddingX * 2,
+                                widestLayer + AGENT_GRAPH_LAYOUT.paddingX * 2);
+
+    let currentY = AGENT_GRAPH_LAYOUT.paddingY;
+    const positionedNodes = [];
+    const positionedByKey = new Map();
+    orderedLayers.forEach((layer) => {
+        let currentX = AGENT_GRAPH_LAYOUT.paddingX + Math.max(0, (widestLayer - layer.width) / 2);
+        layer.nodes.forEach((node) => {
+            const positioned = {
+                ...node,
+                x: Math.round(currentX),
+                y: Math.round(currentY)
+            };
+            positionedNodes.push(positioned);
+            positionedByKey.set(node.key, positioned);
+            currentX += node.width + AGENT_GRAPH_LAYOUT.columnGap;
+        });
+        currentY += layer.height + AGENT_GRAPH_LAYOUT.rowGap;
+    });
+
+    const graphHeight = Math.max(AGENT_GRAPH_LAYOUT.agentHeight + AGENT_GRAPH_LAYOUT.paddingY * 2,
+                                 currentY - AGENT_GRAPH_LAYOUT.rowGap + AGENT_GRAPH_LAYOUT.paddingY);
+
+    const positionedEdges = edges
+        .map((edge) => {
+            const source = positionedByKey.get(edge.sourceKey);
+            const target = positionedByKey.get(edge.targetKey);
+            if (!source || !target) {
+                return null;
+            }
+            return {
+                ...edge,
+                path: agentGraphEdgePath(source, target),
+                active: edge.sourceKey === graph.selectedAgentKey || edge.targetKey === graph.selectedAgentKey,
+                sourceName: source.name,
+                targetName: target.name
+            };
+        })
+        .filter(Boolean);
+
+    return {
+        width: Math.round(graphWidth),
+        height: Math.round(graphHeight),
+        nodes: positionedNodes,
+        edges: positionedEdges,
+        selectedAgentKey: graph.selectedAgentKey,
+        agentCount: nodes.filter((node) => node.nodeKind === "agent").length,
+        toolCount: nodes.filter((node) => node.nodeKind === "tool").length
+    };
+}
+
+function computeAgentGraphDepths(nodes, workflowEdges) {
+    const agentNodes = nodes.filter((node) => node.nodeKind === "agent");
+    const indegree = new Map(agentNodes.map((node) => [node.key, 0]));
+    const outgoing = new Map(agentNodes.map((node) => [node.key, []]));
+    const depthByKey = new Map(agentNodes.map((node) => [node.key, 0]));
+
+    workflowEdges.forEach((edge) => {
+        if (!indegree.has(edge.sourceKey) || !indegree.has(edge.targetKey)) {
+            return;
+        }
+        indegree.set(edge.targetKey, (indegree.get(edge.targetKey) || 0) + 1);
+        outgoing.get(edge.sourceKey).push(edge.targetKey);
+    });
+
+    let queue = agentNodes
+        .filter((node) => (indegree.get(node.key) || 0) === 0)
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map((node) => node.key);
+
+    if (queue.length === 0) {
+        queue = agentNodes.map((node) => node.key);
+    }
+
+    const remainingIndegree = new Map(indegree);
+    while (queue.length > 0) {
+        const currentKey = queue.shift();
+        const nextDepth = depthByKey.get(currentKey) ?? 0;
+        (outgoing.get(currentKey) || []).forEach((targetKey) => {
+            depthByKey.set(targetKey, Math.max(depthByKey.get(targetKey) ?? 0, nextDepth + 1));
+            remainingIndegree.set(targetKey, (remainingIndegree.get(targetKey) || 1) - 1);
+            if ((remainingIndegree.get(targetKey) || 0) === 0) {
+                queue.push(targetKey);
+            }
+        });
+    }
+
+    agentNodes.forEach((node) => {
+        if (!depthByKey.has(node.key)) {
+            depthByKey.set(node.key, 0);
+        }
+    });
+
+    return depthByKey;
+}
+
+function agentGraphNodeBarycenter(node, incomingByKey, orderHints) {
+    const incoming = (incomingByKey.get(node.key) || [])
+        .map((parentKey) => orderHints.get(parentKey))
+        .filter((value) => Number.isFinite(value));
+    if (incoming.length === 0) {
+        return Number.POSITIVE_INFINITY;
+    }
+    return incoming.reduce((sum, value) => sum + value, 0) / incoming.length;
+}
+
+function agentGraphEdgePath(source, target) {
+    const startX = source.x + source.width / 2;
+    const startY = source.y + source.height;
+    const endX = target.x + target.width / 2;
+    const endY = target.y;
+    const distanceY = Math.max(40, endY - startY);
+    const controlY = Math.max(34, distanceY * 0.42);
+    return `M ${startX} ${startY} C ${startX} ${startY + controlY} ${endX} ${endY - controlY} ${endX} ${endY}`;
+}
+
+function renderAgentGraph(graph) {
+    return `
+        <div class="agent-graph-shell">
+            <div class="agent-graph-meta">
+                <span class="agent-graph-pill">${graph.agentCount} agent${graph.agentCount === 1 ? "" : "s"}</span>
+                <span class="agent-graph-pill">${graph.toolCount} tool node${graph.toolCount === 1 ? "" : "s"}</span>
+            </div>
+            <div class="agent-graph-scroll">
+                <div class="agent-graph-stage" style="width:${graph.width}px; height:${graph.height}px;">
+                    <svg
+                        class="agent-graph-canvas"
+                        viewBox="0 0 ${graph.width} ${graph.height}"
+                        width="${graph.width}"
+                        height="${graph.height}"
+                        aria-hidden="true">
+                        <defs>
+                            <marker id="agent-graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+                                <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"></path>
+                            </marker>
+                        </defs>
+                        ${graph.edges.map(renderAgentGraphEdge).join("")}
+                    </svg>
+                    ${graph.nodes.map(renderAgentGraphNode).join("")}
+                </div>
+            </div>
+            <div class="agent-graph-legend">
+                <span class="agent-graph-legend-item is-agent">Agent</span>
+                <span class="agent-graph-legend-item is-router">Conditional</span>
+                <span class="agent-graph-legend-item is-tool">Tool</span>
+            </div>
+        </div>
+    `;
+}
+
+function renderAgentGraphEdge(edge) {
+    return `
+        <path
+            class="agent-graph-edge is-${escapeHtml(edge.kind)}${edge.active ? " is-active" : ""}"
+            d="${edge.path}"
+            marker-end="url(#agent-graph-arrow)">
+            <title>${escapeHtml(agentGraphEdgeTitle(edge))}</title>
+        </path>
+    `;
+}
+
+function renderAgentGraphNode(node) {
+    const classes = [
+        "agent-graph-node",
+        `is-${node.nodeKind}`,
+        `is-${node.category || "agent"}`
+    ];
+    if (node.active) {
+        classes.push("is-active");
+    }
+    if (!node.selectable) {
+        classes.push("is-static");
+    }
+
+    const content = `
+        <span class="agent-graph-node-topline">
+            <span class="agent-graph-node-icon" aria-hidden="true">${agentGraphNodeIcon(node)}</span>
+            <span class="agent-graph-node-type">${escapeHtml(agentGraphNodeType(node))}</span>
+        </span>
+        <span class="agent-graph-node-label">${escapeHtml(node.name)}</span>
+        <span class="agent-graph-node-meta">${escapeHtml(node.meta)}</span>
+    `;
+    const title = escapeHtml(agentGraphNodeTitle(node));
+    const style = `left:${node.x}px; top:${node.y}px; width:${node.width}px; height:${node.height}px;`;
+
+    if (node.selectable) {
+        return `
+            <button type="button" class="${classes.join(" ")}" data-agent="${escapeHtml(node.name)}" style="${style}" title="${title}">
+                ${content}
+            </button>
+        `;
+    }
+
+    return `
+        <div class="${classes.join(" ")}" style="${style}" title="${title}">
+            ${content}
+        </div>
+    `;
+}
+
+function agentGraphNodeIcon(node) {
+    if (node.nodeKind === "tool") {
+        if (node.category === "mcp-client") {
+            return "🌐";
+        }
+        if (node.category === "tool-provider") {
+            return "🔌";
+        }
+        return "🛠️";
+    }
+    if (node.category === "router") {
+        return "🧭";
+    }
+    return "🤖";
+}
+
+function agentGraphNodeType(node) {
+    if (node.nodeKind === "tool") {
+        if (node.category === "mcp-client") {
+            return "MCP";
+        }
+        if (node.category === "tool-provider") {
+            return "Provider";
+        }
+        return "Tool";
+    }
+    if (node.category === "router") {
+        return "Router";
+    }
+    if (node.category === "workflow") {
+        return "Flow";
+    }
+    return "Agent";
+}
+
+function agentGraphNodeTitle(node) {
+    const detail = node.detail ? `\n${node.detail}` : "";
+    return `${node.name}\n${node.meta}${detail}`;
+}
+
+function agentGraphEdgeTitle(edge) {
+    const relation = edge.kind === "tool"
+        ? `${edge.sourceName} uses ${edge.targetName}`
+        : edge.kind === "conditional"
+            ? `${edge.sourceName} conditionally routes to ${edge.targetName}`
+            : `${edge.sourceName} invokes ${edge.targetName}`;
+    const label = edge.label ? `\nVia: ${edge.label}` : "";
+    const detail = edge.detail ? `\n${edge.detail}` : "";
+    return `${relation}${label}${detail}`;
 }
 
 function renderWorkspace() {
@@ -956,20 +1474,7 @@ function renderChatHistory() {
     const conversation = ensureConversation();
     chatHistory.setAttribute("aria-busy", conversation.pending ? "true" : "false");
     if (conversation.entries.length === 0) {
-        chatHistory.innerHTML = `
-            <div class="chat-empty">
-                <div class="chat-avatar chat-avatar-assistant">AI</div>
-                <div class="chat-empty-card">
-                    <h3>Start a browser conversation</h3>
-                    <p>
-                        ${state.selectedMethod.chatLike
-                            ? "Send a prompt below and each turn will appear here as chat bubbles."
-                            : "Run a structured invocation below and each request and response pair will appear here as transcript cards."}
-                    </p>
-                    <p>Conversation history stays in the browser for the selected agent method, while the inspector shows the latest invocation details.</p>
-                </div>
-            </div>
-        `;
+        chatHistory.innerHTML = "";
         return;
     }
 

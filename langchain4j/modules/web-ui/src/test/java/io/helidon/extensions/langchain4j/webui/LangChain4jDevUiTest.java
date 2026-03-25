@@ -83,6 +83,65 @@ class LangChain4jDevUiTest {
     }
 
     @Test
+    void exposesAgentGraphMetadata() {
+        ClientResponseTyped<String> response = client.get("/langchain4j/ui/api/agents")
+                .request(String.class);
+
+        assertThat(response.status(), is(Status.OK_200));
+        List<?> agents = JSONB.fromJson(response.entity(), List.class);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> workflowAgent = (Map<String, Object>) agents.stream()
+                .filter(Map.class::isInstance)
+                .map(Map.class::cast)
+                .filter(agent -> "browser-routed-workflow".equals(agent.get("name")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(workflowAgent.get("kind"), equalTo("workflow"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> workflowRelations = (List<Map<String, Object>>) workflowAgent.get("relations");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> workflowRelation = workflowRelations.stream()
+                .filter(relation -> "sequence".equals(relation.get("kind")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(workflowRelation.get("targetAgent"), equalTo("browser-flavor-router"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> routerAgent = (Map<String, Object>) agents.stream()
+                .filter(Map.class::isInstance)
+                .map(Map.class::cast)
+                .filter(agent -> "browser-flavor-router".equals(agent.get("name")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(routerAgent.get("kind"), equalTo("router"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> routerRelations = (List<Map<String, Object>>) routerAgent.get("relations");
+        assertThat(routerRelations.stream().map(relation -> String.valueOf(relation.get("targetAgent"))).toList(),
+                   hasItem("browser-se-expert"));
+        assertThat(routerRelations.stream().map(relation -> String.valueOf(relation.get("targetAgent"))).toList(),
+                   hasItem("browser-mp-expert"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> toolAgent = (Map<String, Object>) agents.stream()
+                .filter(Map.class::isInstance)
+                .map(Map.class::cast)
+                .filter(agent -> "browser-tool-agent".equals(agent.get("name")))
+                .findFirst()
+                .orElseThrow();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> tools = (List<Map<String, Object>>) toolAgent.get("tools");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> lookupTool = tools.stream()
+                .filter(tool -> "lookupBrowserDocs".equals(tool.get("name")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(lookupTool.get("kind"), equalTo("tool"));
+        assertThat(lookupTool.get("owner"), equalTo("BrowserLookupTool"));
+        assertThat(lookupTool.get("description"), equalTo("Looks up browser-side Helidon references"));
+    }
+
+    @Test
     void exposesConditionalStateParameters() {
         ClientResponseTyped<String> response = client.get("/langchain4j/ui/api/agents")
                 .request(String.class);

@@ -67,6 +67,7 @@ import dev.langchain4j.agentic.scope.AgenticScopeAccess;
 import dev.langchain4j.agentic.scope.AgenticScopeRegistry;
 import dev.langchain4j.agentic.scope.DefaultAgenticScope;
 import dev.langchain4j.agentic.scope.ResultWithAgenticScope;
+import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.ParameterNameResolver;
 import dev.langchain4j.service.V;
@@ -599,7 +600,7 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                                                 List.copyOf(branches));
     }
 
-    private Optional<Method> activationConditionMethod(Class<?> agentType, Class<?> subagentType) {
+    private static Optional<Method> activationConditionMethod(Class<?> agentType, Class<?> subagentType) {
         return Arrays.stream(agentType.getMethods())
                 .filter(candidate -> Modifier.isStatic(candidate.getModifiers()))
                 .filter(candidate -> candidate.isAnnotationPresent(ActivationCondition.class))
@@ -607,7 +608,7 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                 .findFirst();
     }
 
-    private String conditionalAgentName(Method method) {
+    private static String conditionalAgentName(Method method) {
         ConditionalAgent annotation = method.getAnnotation(ConditionalAgent.class);
         if (annotation == null || annotation.name().isBlank()) {
             return method.getName();
@@ -1010,11 +1011,16 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
     }
 
     private Map<String, AgentHandle> discoverAgents() {
-        LinkedHashMap<String, AgentHandle> discovered = new LinkedHashMap<>();
-        registry.all(AgentMetadata.class)
+        LinkedHashMap<Class<?>, String> agentNamesByType = new LinkedHashMap<>();
+        List<AgentMetadata> discoveredMetadata = registry.all(AgentMetadata.class)
                 .stream()
                 .sorted(Comparator.comparing(AgentMetadata::agentName))
-                .forEach(metadata -> discovered.put(metadata.agentName(), new AgentHandle(metadata, registry)));
+                .toList();
+        discoveredMetadata.forEach(metadata -> agentNamesByType.put(metadata.agentClass(), metadata.agentName()));
+
+        LinkedHashMap<String, AgentHandle> discovered = new LinkedHashMap<>();
+        discoveredMetadata.forEach(metadata -> discovered.put(metadata.agentName(),
+                                                              new AgentHandle(metadata, registry, agentNamesByType)));
         return discovered;
     }
 
@@ -1042,9 +1048,33 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
     private static Map<String, Object> descriptorView(AgentDescriptor descriptor) {
         LinkedHashMap<String, Object> view = new LinkedHashMap<>();
         view.put("name", descriptor.name());
+        view.put("kind", descriptor.kind());
         view.put("interfaceName", descriptor.interfaceName());
         view.put("description", descriptor.description());
         view.put("methods", descriptor.methods().stream().map(LangChain4jDevUi::methodView).toList());
+        view.put("relations", descriptor.relations().stream().map(LangChain4jDevUi::relationView).toList());
+        view.put("tools", descriptor.tools().stream().map(LangChain4jDevUi::toolView).toList());
+        return view;
+    }
+
+    private static Map<String, Object> relationView(AgentRelationDescriptor descriptor) {
+        LinkedHashMap<String, Object> view = new LinkedHashMap<>();
+        view.put("kind", descriptor.kind());
+        view.put("method", descriptor.method());
+        view.put("targetAgent", descriptor.targetAgent());
+        view.put("targetTypeName", descriptor.targetTypeName());
+        view.put("description", descriptor.description());
+        return view;
+    }
+
+    private static Map<String, Object> toolView(ToolDescriptor descriptor) {
+        LinkedHashMap<String, Object> view = new LinkedHashMap<>();
+        view.put("kind", descriptor.kind());
+        view.put("key", descriptor.key());
+        view.put("name", descriptor.name());
+        view.put("owner", descriptor.owner());
+        view.put("typeName", descriptor.typeName());
+        view.put("description", descriptor.description());
         return view;
     }
 
@@ -1079,6 +1109,140 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                                        parameter.isAnnotationPresent(MemoryId.class),
                                        isSimpleFormType(rawType),
                                        enumValues(rawType));
+    }
+
+    private static String agentKind(Class<?> agentType) {
+        if (Arrays.stream(agentType.getMethods())
+                .filter(LangChain4jDevUi::isInvocable)
+                .anyMatch(method -> method.isAnnotationPresent(ConditionalAgent.class))) {
+            return "router";
+        }
+        if (Arrays.stream(agentType.getMethods())
+                .filter(LangChain4jDevUi::isInvocable)
+                .anyMatch(method -> method.isAnnotationPresent(SequenceAgent.class))) {
+            return "workflow";
+        }
+        return "agent";
+    }
+
+    private static List<AgentRelationDescriptor> relationDescriptors(Class<?> agentType,
+                                                                     Map<Class<?>, String> agentNamesByType) {
+        LinkedHashMap<String, AgentRelationDescriptor> descriptors = new LinkedHashMap<>();
+
+        Arrays.stream(agentType.getMethods())
+                .filter(LangChain4jDevUi::isInvocable)
+                .sorted(Comparator.comparing(LangChain4jDevUi::methodId))
+                .forEach(method -> {
+                    SequenceAgent sequenceAgent = method.getAnnotation(SequenceAgent.class);
+                    if (sequenceAgent != null) {
+                        for (Class<?> subAgentType : sequenceAgent.subAgents()) {
+                            String targetAgent = resolveAgentName(subAgentType, agentNamesByType);
+                            AgentRelationDescriptor descriptor = new AgentRelationDescriptor("sequence",
+                                                                                             method.getName(),
+                                                                                             targetAgent,
+                                                                                             subAgentType.getName(),
+                                                                                             null);
+                            descriptors.putIfAbsent(descriptor.kind()
+                                                            + "::"
+                                                            + descriptor.method()
+                                                            + "::"
+                                                            + descriptor.targetTypeName(),
+                                                    descriptor);
+                        }
+                    }
+
+                    ConditionalAgent conditionalAgent = method.getAnnotation(ConditionalAgent.class);
+                    if (conditionalAgent != null) {
+                        String methodName = conditionalAgentName(method);
+                        for (Class<?> subAgentType : conditionalAgent.subAgents()) {
+                            String targetAgent = resolveAgentName(subAgentType, agentNamesByType);
+                            String description = activationConditionMethod(agentType, subAgentType)
+                                    .map(activationMethod -> activationMethod.getAnnotation(ActivationCondition.class))
+                                    .map(ActivationCondition::description)
+                                    .filter(text -> !text.isBlank())
+                                    .orElse(null);
+                            AgentRelationDescriptor descriptor = new AgentRelationDescriptor("conditional",
+                                                                                             methodName,
+                                                                                             targetAgent,
+                                                                                             subAgentType.getName(),
+                                                                                             description);
+                            descriptors.putIfAbsent(descriptor.kind()
+                                                            + "::"
+                                                            + descriptor.method()
+                                                            + "::"
+                                                            + descriptor.targetTypeName(),
+                                                    descriptor);
+                        }
+                    }
+                });
+
+        return List.copyOf(descriptors.values());
+    }
+
+    private static List<ToolDescriptor> toolDescriptors(AgentMetadata metadata) {
+        LinkedHashMap<String, ToolDescriptor> descriptors = new LinkedHashMap<>();
+
+        metadata.buildTimeConfig().tools().stream()
+                .sorted(Comparator.comparing(Class::getName))
+                .forEach(toolType -> declaredToolDescriptors(toolType).forEach(descriptor -> descriptors.putIfAbsent(descriptor.key(),
+                                                                                                                   descriptor)));
+
+        metadata.buildTimeConfig().toolProvider()
+                .filter(providerName -> !providerName.isBlank())
+                .ifPresent(providerName -> descriptors.putIfAbsent("tool-provider::" + providerName,
+                                                                   new ToolDescriptor("tool-provider",
+                                                                                      "tool-provider::" + providerName,
+                                                                                      providerName,
+                                                                                      "Tool provider",
+                                                                                      providerName,
+                                                                                      null)));
+
+        metadata.buildTimeConfig().mcpClients().stream()
+                .sorted()
+                .forEach(clientName -> descriptors.putIfAbsent("mcp-client::" + clientName,
+                                                               new ToolDescriptor("mcp-client",
+                                                                                  "mcp-client::" + clientName,
+                                                                                  clientName,
+                                                                                  "MCP client",
+                                                                                  clientName,
+                                                                                  null)));
+
+        return List.copyOf(descriptors.values());
+    }
+
+    private static List<ToolDescriptor> declaredToolDescriptors(Class<?> toolType) {
+        return Arrays.stream(toolType.getDeclaredMethods())
+                .filter(method -> method.isAnnotationPresent(Tool.class))
+                .sorted(Comparator.comparing(LangChain4jDevUi::toolDisplayName)
+                                 .thenComparing(Method::getName))
+                .map(method -> new ToolDescriptor("tool",
+                                                  "tool::" + toolType.getName() + "::" + toolDisplayName(method),
+                                                  toolDisplayName(method),
+                                                  toolType.getSimpleName(),
+                                                  toolType.getName(),
+                                                  toolDescription(method)))
+                .toList();
+    }
+
+    private static String toolDisplayName(Method method) {
+        Tool annotation = method.getAnnotation(Tool.class);
+        if (annotation == null || annotation.name().isBlank()) {
+            return method.getName();
+        }
+        return annotation.name();
+    }
+
+    private static String toolDescription(Method method) {
+        Tool annotation = method.getAnnotation(Tool.class);
+        if (annotation == null || annotation.value().length == 0) {
+            return null;
+        }
+        String description = String.join(" ", annotation.value()).trim();
+        return description.isBlank() ? null : description;
+    }
+
+    private static String resolveAgentName(Class<?> agentType, Map<Class<?>, String> agentNamesByType) {
+        return agentNamesByType.getOrDefault(agentType, agentType.getSimpleName());
     }
 
     private static List<ParameterDescriptor> stateParameters(Class<?> agentType,
@@ -1325,12 +1489,17 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         private final Object service;
         private final Map<String, AgentMethodHandle> methods;
 
-        private AgentHandle(AgentMetadata metadata, ServiceRegistry registry) {
+        private AgentHandle(AgentMetadata metadata,
+                            ServiceRegistry registry,
+                            Map<Class<?>, String> agentNamesByType) {
             this.agentType = metadata.agentClass();
             this.descriptor = new AgentDescriptor(metadata.agentName(),
+                                                  agentKind(metadata.agentClass()),
                                                   metadata.agentClass().getName(),
                                                   metadata.buildTimeConfig().description().orElse(null),
-                                                  methods(metadata.agentClass()));
+                                                  methods(metadata.agentClass()),
+                                                  relationDescriptors(metadata.agentClass(), agentNamesByType),
+                                                  toolDescriptors(metadata));
             this.service = registry.get(metadata.agentClass());
             this.methods = this.descriptor.methods().stream()
                     .collect(java.util.stream.Collectors.toMap(MethodDescriptor::id,
@@ -1421,7 +1590,28 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         }
     }
 
-    private record AgentDescriptor(String name, String interfaceName, String description, List<MethodDescriptor> methods) {
+    private record AgentDescriptor(String name,
+                                   String kind,
+                                   String interfaceName,
+                                   String description,
+                                   List<MethodDescriptor> methods,
+                                   List<AgentRelationDescriptor> relations,
+                                   List<ToolDescriptor> tools) {
+    }
+
+    private record AgentRelationDescriptor(String kind,
+                                           String method,
+                                           String targetAgent,
+                                           String targetTypeName,
+                                           String description) {
+    }
+
+    private record ToolDescriptor(String kind,
+                                  String key,
+                                  String name,
+                                  String owner,
+                                  String typeName,
+                                  String description) {
     }
 
     private record MethodDescriptor(String id,

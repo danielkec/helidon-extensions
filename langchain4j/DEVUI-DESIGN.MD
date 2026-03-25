@@ -197,20 +197,24 @@ No npm toolchain. Use static:
 
 Layout direction:
 
-- left rail: agents
-- center: transcript-first invoke/chat workspace
-- right rail: tabs for latest state, invocations, and events
+- top: full-width clickable graph of discovered agents, workflow edges, and tool relationships
+- bottom left: transcript-first invoke/chat workspace
+- bottom right: tabs for latest state, invocations, and events
 
 Visual language for v1:
 
 - mirror the current `helidon.io` palette
 - use a dark navy and slate shell with glassy panels, bright text, pale blue highlights, and pink action accents
 - keep the UI recognizably Helidon rather than generic admin-dashboard styling
+- keep the top graph panel content-first without redundant local title-bar chrome
+- keep the transcript workspace compact by dropping redundant local run-title chrome and leaving the transcript blank until the first request instead of showing an onboarding bubble
+- let graph nodes widen to keep agent or tool names on one line when practical, allowing roughly 35 visible name characters before wrapping so very long identifiers still wrap instead of stretching the graph excessively
 - long Java identifiers such as fully qualified agent interface names must wrap inside cards, chips, and trace titles instead of overflowing their container
 
 UI capabilities:
 
-- switch agents and methods
+- switch agents and methods from a graph-based navigator rather than a flat list
+- visualize declared agent-to-agent workflow links and declared agent-to-tool relationships in the left rail, including conditional routes, sequence steps, explicit tool classes, and named tool-provider or MCP-backed tool sources when concrete tool names are not available at discovery time
 - run chat-like prompts quickly
 - provide extra workflow state inputs required by agentic routing or activation conditions
 - show browser conversation history as chat bubbles, with a composer anchored below the transcript
