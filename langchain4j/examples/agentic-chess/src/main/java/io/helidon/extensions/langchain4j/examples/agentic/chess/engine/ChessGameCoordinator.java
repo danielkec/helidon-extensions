@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.locks.Lock;
 import java.util.stream.Stream;
 
 import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.ChessCommentaryAgent;
@@ -68,7 +69,9 @@ public final class ChessGameCoordinator {
 
     public ChessSnapshot createGame() {
         ChessSession session = sessions.create();
-        synchronized (session.lock()) {
+        Lock writeLock = session.writeLock();
+        writeLock.lock();
+        try {
             session.waitingFor(WaitingFor.HUMAN);
             session.aiThinking(false);
             session.commentaryStreaming(false);
@@ -76,6 +79,8 @@ public final class ChessGameCoordinator {
             session.terminalMessage("");
             session.streamingCommentary("");
             session.touch();
+        } finally {
+            writeLock.unlock();
         }
         startGameLoop(session.sessionId(), session.generation());
         return session.snapshot(rules);
@@ -84,7 +89,9 @@ public final class ChessGameCoordinator {
     public ChessSnapshot resetGame(String sessionId) {
         hitlBridge.cancel(sessionId);
         ChessSession session = sessions.reset(sessionId);
-        synchronized (session.lock()) {
+        Lock writeLock = session.writeLock();
+        writeLock.lock();
+        try {
             session.waitingFor(WaitingFor.HUMAN);
             session.aiThinking(false);
             session.commentaryStreaming(false);
@@ -92,6 +99,8 @@ public final class ChessGameCoordinator {
             session.terminalMessage("");
             session.streamingCommentary("");
             session.touch();
+        } finally {
+            writeLock.unlock();
         }
         startGameLoop(session.sessionId(), session.generation());
         return session.snapshot(rules);
@@ -109,8 +118,10 @@ public final class ChessGameCoordinator {
         ChessSession session = sessions.require(sessionId);
         ChessSnapshot snapshot;
         String normalizedMove;
-        synchronized (session.lock()) {
-            snapshot = session.snapshot(rules);
+        Lock writeLock = session.writeLock();
+        writeLock.lock();
+        try {
+            snapshot = session.snapshotLocked(rules);
             if (session.status() != GameStatus.ACTIVE) {
                 return new MoveSubmissionResult(false, "Game is already finished.", snapshot);
             }
@@ -135,6 +146,8 @@ public final class ChessGameCoordinator {
                 return new MoveSubmissionResult(false, "Illegal move.", snapshot);
             }
             normalizedMove = legalMove.get().uci();
+        } finally {
+            writeLock.unlock();
         }
 
         boolean accepted = hitlBridge.submitMove(sessionId, normalizedMove);
@@ -231,7 +244,9 @@ public final class ChessGameCoordinator {
             String failureMessage = failureDescription(failure);
             LOGGER.log(System.Logger.Level.ERROR, "Agentic chess game loop failed for session " + sessionId, e);
             ChessSnapshot snapshot;
-            synchronized (session.lock()) {
+            Lock writeLock = session.writeLock();
+            writeLock.lock();
+            try {
                 session.waitingFor(WaitingFor.NONE);
                 session.aiThinking(false);
                 session.commentaryStreaming(false);
@@ -239,7 +254,9 @@ public final class ChessGameCoordinator {
                 session.terminalMessage("Game loop failed: " + failureMessage);
                 session.streamingCommentary("");
                 session.touch();
-                snapshot = session.snapshot(rules);
+                snapshot = session.snapshotLocked(rules);
+            } finally {
+                writeLock.unlock();
             }
             broadcaster.broadcast(sessionId, new ChessEvent("error",
                                                             sessionId,
@@ -252,7 +269,9 @@ public final class ChessGameCoordinator {
     }
 
     private HumanTurnContext prepareHumanTurn(ChessSession session) {
-        synchronized (session.lock()) {
+        Lock writeLock = session.writeLock();
+        writeLock.lock();
+        try {
             List<ChessMove> legalMoves = rules.legalMoves(session.position());
             session.waitingFor(WaitingFor.HUMAN);
             session.aiThinking(false);
@@ -260,23 +279,27 @@ public final class ChessGameCoordinator {
             session.commentaryPhase("");
             session.streamingCommentary("");
             session.touch();
-            ChessSnapshot snapshot = session.snapshot(rules);
+            ChessSnapshot snapshot = session.snapshotLocked(rules);
             String humanContext = promptSupport.humanInputContext(session.position(), legalMoves, rules);
             return new HumanTurnContext(humanContext,
                                         rules.legalMovesSummary(session.position(), legalMoves),
                                         snapshot);
+        } finally {
+            writeLock.unlock();
         }
     }
 
     private boolean applyHumanMove(String sessionId, ChessSession session, String generation, String moveUci) {
         ChessSnapshot snapshot;
-        synchronized (session.lock()) {
+        Lock writeLock = session.writeLock();
+        writeLock.lock();
+        try {
             if (!session.generation().equals(generation) || session.waitingFor() != WaitingFor.HUMAN) {
                 return false;
             }
             Optional<ChessMove> move = rules.findLegalMove(session.position(), moveUci);
             if (move.isEmpty()) {
-                snapshot = session.snapshot(rules);
+                snapshot = session.snapshotLocked(rules);
                 broadcaster.broadcast(sessionId, new ChessEvent("human-move-rejected",
                                                                 sessionId,
                                                                 snapshot.revision(),
@@ -300,7 +323,9 @@ public final class ChessGameCoordinator {
             session.waitingFor(session.status() == GameStatus.ACTIVE ? WaitingFor.AI : WaitingFor.COMMENTARY);
             session.terminalMessage(terminalMessage(nextPosition, session.status()));
             session.touch();
-            snapshot = session.snapshot(rules);
+            snapshot = session.snapshotLocked(rules);
+        } finally {
+            writeLock.unlock();
         }
         broadcaster.broadcast(sessionId, new ChessEvent("human-move-accepted",
                                                         sessionId,
@@ -317,7 +342,9 @@ public final class ChessGameCoordinator {
         if (session == null) {
             return null;
         }
-        synchronized (session.lock()) {
+        Lock writeLock = session.writeLock();
+        writeLock.lock();
+        try {
             if (session.status() != GameStatus.ACTIVE) {
                 return null;
             }
@@ -326,19 +353,23 @@ public final class ChessGameCoordinator {
             session.waitingFor(WaitingFor.AI);
             session.aiThinking(true);
             session.touch();
-            ChessSnapshot snapshot = session.snapshot(rules);
+            ChessSnapshot snapshot = session.snapshotLocked(rules);
             return new AiTurnContext(rootPosition,
                                      rootPosition.toFen(),
                                      rootPosition.sideToMove().display(),
                                      promptSupport.moveHistory(session.moveHistory()),
                                      rules.legalMovesSummary(rootPosition, legalMoves),
                                      snapshot);
+        } finally {
+            writeLock.unlock();
         }
     }
 
     private void applyAiMove(String sessionId, ChessSession session, ChessPosition rootPosition, AiMoveProposal proposal) {
         ChessSnapshot snapshot;
-        synchronized (session.lock()) {
+        Lock writeLock = session.writeLock();
+        writeLock.lock();
+        try {
             ChessMove chosenMove = rules.findLegalMove(rootPosition, proposal.getMove())
                     .orElseThrow(() -> new IllegalStateException("AI chose an illegal move: " + proposal.getMove()));
             List<CandidateLine> candidateLines = toCandidateLines(rootPosition, proposal);
@@ -355,7 +386,9 @@ public final class ChessGameCoordinator {
             session.waitingFor(WaitingFor.COMMENTARY);
             session.terminalMessage(terminalMessage(nextPosition, session.status()));
             session.touch();
-            snapshot = session.snapshot(rules);
+            snapshot = session.snapshotLocked(rules);
+        } finally {
+            writeLock.unlock();
         }
         broadcaster.broadcast(sessionId, new ChessEvent("ai-move-accepted",
                                                         sessionId,
@@ -400,7 +433,9 @@ public final class ChessGameCoordinator {
         String moveHistory;
         long commentaryRunId;
         ChessSnapshot startSnapshot;
-        synchronized (session.lock()) {
+        Lock writeLock = session.writeLock();
+        writeLock.lock();
+        try {
             session.commentaryRunId(session.commentaryRunId() + 1);
             commentaryRunId = session.commentaryRunId();
             session.commentaryStreaming(true);
@@ -411,7 +446,9 @@ public final class ChessGameCoordinator {
             status = session.status().name();
             lastMove = session.lastMove();
             moveHistory = promptSupport.moveHistory(session.moveHistory());
-            startSnapshot = session.snapshot(rules);
+            startSnapshot = session.snapshotLocked(rules);
+        } finally {
+            writeLock.unlock();
         }
         broadcaster.broadcast(sessionId, new ChessEvent("commentary-start",
                                                         sessionId,
@@ -430,13 +467,17 @@ public final class ChessGameCoordinator {
                 }
                 String token = iterator.next();
                 long revision;
-                synchronized (current.lock()) {
+                Lock currentWriteLock = current.writeLock();
+                currentWriteLock.lock();
+                try {
                     if (current.commentaryRunId() != commentaryRunId || !current.commentaryStreaming()) {
                         return;
                     }
                     current.streamingCommentary(current.streamingCommentary() + token);
                     current.touch();
                     revision = current.revision();
+                } finally {
+                    currentWriteLock.unlock();
                 }
                 broadcaster.broadcast(sessionId, new ChessEvent("commentary-chunk",
                                                                 sessionId,
@@ -450,7 +491,9 @@ public final class ChessGameCoordinator {
             ChessSession current = currentSession(sessionId, generation);
             if (current != null) {
                 ChessSnapshot errorSnapshot;
-                synchronized (current.lock()) {
+                Lock currentWriteLock = current.writeLock();
+                currentWriteLock.lock();
+                try {
                     if (current.commentaryRunId() != commentaryRunId) {
                         return;
                     }
@@ -458,7 +501,9 @@ public final class ChessGameCoordinator {
                     current.commentaryPhase("");
                     current.streamingCommentary("");
                     current.touch();
-                    errorSnapshot = current.snapshot(rules);
+                    errorSnapshot = current.snapshotLocked(rules);
+                } finally {
+                    currentWriteLock.unlock();
                 }
                 broadcaster.broadcast(sessionId, new ChessEvent("error",
                                                                 sessionId,
@@ -477,7 +522,9 @@ public final class ChessGameCoordinator {
         }
 
         ChessSnapshot endSnapshot;
-        synchronized (session.lock()) {
+        writeLock = session.writeLock();
+        writeLock.lock();
+        try {
             if (session.commentaryRunId() != commentaryRunId || !session.commentaryStreaming()) {
                 return;
             }
@@ -489,7 +536,9 @@ public final class ChessGameCoordinator {
             session.commentaryPhase("");
             session.streamingCommentary("");
             session.touch();
-            endSnapshot = session.snapshot(rules);
+            endSnapshot = session.snapshotLocked(rules);
+        } finally {
+            writeLock.unlock();
         }
         broadcaster.broadcast(sessionId, new ChessEvent("commentary-finished",
                                                         sessionId,
@@ -506,7 +555,9 @@ public final class ChessGameCoordinator {
             return true;
         }
         ChessSnapshot snapshot;
-        synchronized (session.lock()) {
+        Lock writeLock = session.writeLock();
+        writeLock.lock();
+        try {
             if (session.status() == GameStatus.ACTIVE) {
                 return false;
             }
@@ -516,7 +567,9 @@ public final class ChessGameCoordinator {
             session.commentaryPhase("");
             session.streamingCommentary("");
             session.touch();
-            snapshot = session.snapshot(rules);
+            snapshot = session.snapshotLocked(rules);
+        } finally {
+            writeLock.unlock();
         }
         broadcaster.broadcast(sessionId, new ChessEvent("game-over",
                                                         sessionId,

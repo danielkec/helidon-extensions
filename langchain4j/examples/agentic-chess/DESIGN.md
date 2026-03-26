@@ -127,6 +127,7 @@ The user plays a full chess game against an AI opponent through a web UI.
   - session or memory identifier
 - Preferred v1 direction is an in-memory server-side session store keyed by a browser session identifier, with no durable persistence.
 - LangChain4j memory may still be used for agent context, but authoritative chess legality and board state should live in deterministic application state rather than only in chat memory.
+- Session state concurrency uses explicit `ReentrantReadWriteLock` coordination, and WebSocket outbound sends use per-session `ReentrantLock` serialization instead of intrinsic monitors.
 
 ## Chess Domain Scope
 
@@ -220,6 +221,9 @@ Helidon SE declarative example application.
 - `ChessSessionStore`
   - in-memory game/session store for v1
   - keyed by a browser session or generated game identifier
+- `ChessSession`
+  - protects mutable game state with `ReentrantReadWriteLock`
+  - exposes write-locked snapshot generation for coordinator transitions
 - `ChessRulesService`
   - authoritative deterministic chess rules implementation
   - computes legal moves and applies accepted moves
@@ -235,6 +239,8 @@ Helidon SE declarative example application.
 - `IllegalMoveOutputGuardrail`
   - validates the AI proposal against the legal moves from `ChessRulesService`
   - reprompts on malformed or illegal output while normalizing the structured result
+- `ChessEventBroadcaster`
+  - serializes outbound WebSocket sends per browser session using explicit reentrant locks instead of intrinsic monitors
 
 ### Preferred Turn Flow
 
@@ -340,6 +346,7 @@ No blocking open questions for v1 at this stage.
 - 2026-03-25: `ChessOpponentAgent` uses typed structured output (`AiMoveProposal`), while the current OCI OpenAI-compatible live path relies on LangChain4j fallback output-format instructions instead of provider-side JSON-schema response formatting.
 - 2026-03-25: AI-facing Java types use the `Agent` suffix consistently, including `ChessCommentaryAgent` and `ChessHumanMoveWorkflowAgent`.
 - 2026-03-25: WebSocket event broadcasting must remove dead sessions on send failure so browser disconnects cannot crash the chess game loop.
+- 2026-03-26: WebSocket event broadcasting now serializes sends per browser session connection to avoid concurrent `WsSession.send(...)` calls against the same Helidon WebSocket session.
 - 2026-03-25: The example uses standard Helidon JUL logging configuration via `logging.properties`, with SLF4J logs bridged into JUL.
 - 2026-03-25: After a human move, White commentary now streams in parallel with Black move selection; the snapshot contract exposes separate `aiThinking`, `commentaryStreaming`, and `commentaryPhase` state so the UI can represent overlapping progress while keeping Black's move application aligned with the finished White commentary.
 - 2026-03-26: Helidon declarative agent config now exposes `output-guardrails-config.max-retries`, and the example currently sets the chess opponent guardrail retry budget to `6` there instead of relying only on LangChain4j defaults.

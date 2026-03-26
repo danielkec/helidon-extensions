@@ -19,6 +19,8 @@ package io.helidon.extensions.langchain4j.examples.agentic.chess.engine;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.CandidateLineView;
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.ChessSnapshot;
@@ -29,7 +31,7 @@ import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.MoveEntryVie
 final class ChessSession {
     private final String sessionId;
     private final String generation;
-    private final Object lock = new Object();
+    private final ReentrantReadWriteLock stateLock = new ReentrantReadWriteLock();
 
     private ChessPosition position;
     private GameStatus status;
@@ -66,8 +68,12 @@ final class ChessSession {
         this.terminalMessage = "";
     }
 
-    Object lock() {
-        return lock;
+    Lock readLock() {
+        return stateLock.readLock();
+    }
+
+    Lock writeLock() {
+        return stateLock.writeLock();
     }
 
     String sessionId() {
@@ -183,40 +189,48 @@ final class ChessSession {
     }
 
     ChessSnapshot snapshot(ChessRulesService rules) {
-        synchronized (lock) {
-            List<LegalMoveView> legalMoves = waitingFor == WaitingFor.HUMAN && status == GameStatus.ACTIVE
-                    ? rules.legalMoves(position).stream()
-                            .map(move -> new LegalMoveView(move.uci(), move.fromSquare(), move.toSquare(), move.isPromotion()))
-                            .toList()
-                    : List.of();
-
-            List<MoveEntryView> moveEntries = moveHistory.stream()
-                    .map(move -> new MoveEntryView(move.ply(), move.side().name(), move.move()))
-                    .toList();
-            List<CommentaryView> commentaryEntries = commentary.stream()
-                    .map(entry -> new CommentaryView(entry.phase(), entry.text()))
-                    .toList();
-            List<CandidateLineView> candidateLineViews = candidateLines.stream()
-                    .map(line -> new CandidateLineView(line.summary(), line.moves(), line.finalFen()))
-                    .toList();
-
-            return new ChessSnapshot(sessionId,
-                                     revision,
-                                     position.toFen(),
-                                     position.sideToMove().name(),
-                                     status.name(),
-                                     waitingFor.name(),
-                                     waitingFor == WaitingFor.HUMAN && status == GameStatus.ACTIVE,
-                                     aiThinking,
-                                     commentaryStreaming,
-                                     commentaryPhase,
-                                     lastMove,
-                                     streamingCommentary,
-                                     terminalMessage,
-                                     legalMoves,
-                                     moveEntries,
-                                     commentaryEntries,
-                                     candidateLineViews);
+        Lock readLock = readLock();
+        readLock.lock();
+        try {
+            return snapshotLocked(rules);
+        } finally {
+            readLock.unlock();
         }
+    }
+
+    ChessSnapshot snapshotLocked(ChessRulesService rules) {
+        List<LegalMoveView> legalMoves = waitingFor == WaitingFor.HUMAN && status == GameStatus.ACTIVE
+                ? rules.legalMoves(position).stream()
+                        .map(move -> new LegalMoveView(move.uci(), move.fromSquare(), move.toSquare(), move.isPromotion()))
+                        .toList()
+                : List.of();
+
+        List<MoveEntryView> moveEntries = moveHistory.stream()
+                .map(move -> new MoveEntryView(move.ply(), move.side().name(), move.move()))
+                .toList();
+        List<CommentaryView> commentaryEntries = commentary.stream()
+                .map(entry -> new CommentaryView(entry.phase(), entry.text()))
+                .toList();
+        List<CandidateLineView> candidateLineViews = candidateLines.stream()
+                .map(line -> new CandidateLineView(line.summary(), line.moves(), line.finalFen()))
+                .toList();
+
+        return new ChessSnapshot(sessionId,
+                                 revision,
+                                 position.toFen(),
+                                 position.sideToMove().name(),
+                                 status.name(),
+                                 waitingFor.name(),
+                                 waitingFor == WaitingFor.HUMAN && status == GameStatus.ACTIVE,
+                                 aiThinking,
+                                 commentaryStreaming,
+                                 commentaryPhase,
+                                 lastMove,
+                                 streamingCommentary,
+                                 terminalMessage,
+                                 legalMoves,
+                                 moveEntries,
+                                 commentaryEntries,
+                                 candidateLineViews);
     }
 }

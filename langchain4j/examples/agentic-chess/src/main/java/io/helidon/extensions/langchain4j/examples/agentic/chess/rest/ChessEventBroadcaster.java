@@ -22,6 +22,8 @@ import java.util.ArrayList;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.ChessEvent;
 import io.helidon.service.registry.Service;
@@ -36,8 +38,10 @@ public final class ChessEventBroadcaster {
 
     private final Jsonb jsonb = JsonbBuilder.create();
     private final ConcurrentMap<String, Set<WsSession>> sessions = new ConcurrentHashMap<>();
+    private final ConcurrentMap<WsSession, ReentrantLock> sendLocks = new ConcurrentHashMap<>();
 
     public void register(String sessionId, WsSession session) {
+        sendLocks.putIfAbsent(session, new ReentrantLock());
         sessions.computeIfAbsent(sessionId, ignored -> ConcurrentHashMap.newKeySet()).add(session);
     }
 
@@ -46,6 +50,7 @@ public final class ChessEventBroadcaster {
             activeSessions.remove(session);
             return activeSessions.isEmpty() ? null : activeSessions;
         });
+        sendLocks.remove(session);
     }
 
     public void broadcast(String sessionId, ChessEvent event) {
@@ -57,7 +62,13 @@ public final class ChessEventBroadcaster {
 
         for (WsSession session : new ArrayList<>(activeSessions)) {
             try {
-                session.send(payload, true);
+                Lock sendLock = sendLocks.computeIfAbsent(session, ignored -> new ReentrantLock());
+                sendLock.lock();
+                try {
+                    session.send(payload, true);
+                } finally {
+                    sendLock.unlock();
+                }
             } catch (RuntimeException e) {
                 unregister(sessionId, session);
                 if (isClosedConnection(e)) {
