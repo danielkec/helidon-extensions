@@ -10,6 +10,7 @@ The module provides:
 - JSON endpoints for agent discovery and invocation
 - browser-local chat and invocation history
 - latest invocation state, trace, and event inspection
+- optional app-wide event tracking for agent runs started outside the browser UI
 
 ## Add The Module
 
@@ -99,6 +100,8 @@ The UI supports:
 - providing extra agentic state values required by workflow routing, such as conditional-agent activation keys
 - keeping conversation history in the browser for the selected method
 - inspecting the latest raw result, state snapshot, invocation trace, and event log
+- toggling app-wide event tracking so the inspector and progress strip can follow agent runs triggered elsewhere in the application
+- automatically focusing the event log when app-wide tracking is enabled so external agent activity becomes visible immediately
 
 For methods that declare `@MemoryId`, the browser generates and reuses a hidden conversation key automatically. There
 is no manual session field or session management UI.
@@ -108,7 +111,9 @@ is no manual session field or session management UI.
 - Agents must be Helidon-managed LangChain4j agents with generated `AgentMetadata`.
 - Latest-invocation state and trace inspection work when the invoked flow exposes an `AgenticScope`, either directly or
   through `AgenticScopeAccess`.
-- Event logs are capture-on-invoke only; the UI does not maintain a server-side session store.
+- By default event logs are capture-on-invoke only; the UI does not maintain a server-side session store.
+- App-wide tracking is opt-in from the browser toggle and keeps only a rolling in-memory buffer of recent events plus the latest observed scope snapshot.
+- Tracking covers both declarative agents and generated `@Ai.Service` interfaces, including AI-service request/response and guardrail events.
 - Agent services are resolved when the UI service starts, not lazily on first request.
 
 ## JSON API
@@ -117,6 +122,10 @@ The browser UI is backed by these endpoints under the configured base path:
 
 - `GET /api/agents`
 - `POST /api/invoke`
+- `POST /api/invocations`
+- `GET /api/invocations/{id}`
+- `GET /api/tracking`
+- `POST /api/tracking`
 
 `POST /api/invoke` accepts:
 

@@ -16,11 +16,15 @@
 
 package io.helidon.extensions.langchain4j.webui;
 
+import java.lang.reflect.Method;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 import io.helidon.builder.api.RuntimeType;
 import io.helidon.common.Weighted;
+import io.helidon.service.registry.GlobalServiceRegistry;
+import io.helidon.service.registry.ServiceRegistry;
 import io.helidon.webserver.WebServer;
 import io.helidon.webserver.http.HttpFeature;
 import io.helidon.webserver.http.HttpRouting;
@@ -89,9 +93,11 @@ public final class LangChain4jDevUiFeature implements ServerFeature, Weighted, R
             return;
         }
 
+        ServiceRegistry registry = resolveRegistry(featureContext);
+
         featureContext.socket(WebServer.DEFAULT_SOCKET_NAME)
                 .httpRouting()
-                .addFeature(new LangChain4jDevUiRoutingFeature(config));
+                .addFeature(new LangChain4jDevUiRoutingFeature(config, registry));
     }
 
     @Override
@@ -114,16 +120,31 @@ public final class LangChain4jDevUiFeature implements ServerFeature, Weighted, R
         return config;
     }
 
+    private static ServiceRegistry resolveRegistry(ServerFeatureContext featureContext) {
+        try {
+            Method method = featureContext.serverConfig().getClass().getMethod("serviceRegistry");
+            Object result = method.invoke(featureContext.serverConfig());
+            if (result instanceof Optional<?> optional && optional.orElse(null) instanceof ServiceRegistry registry) {
+                return registry;
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // Fall back to the current global registry when the generated config API is unavailable.
+        }
+        return GlobalServiceRegistry.registry();
+    }
+
     private static final class LangChain4jDevUiRoutingFeature implements HttpFeature, Weighted {
         private final LangChain4jDevUiConfig config;
+        private final ServiceRegistry registry;
 
-        private LangChain4jDevUiRoutingFeature(LangChain4jDevUiConfig config) {
+        private LangChain4jDevUiRoutingFeature(LangChain4jDevUiConfig config, ServiceRegistry registry) {
             this.config = config;
+            this.registry = registry;
         }
 
         @Override
         public void setup(HttpRouting.Builder routing) {
-            routing.register(LangChain4jDevUi.create(config));
+            routing.register(LangChain4jDevUi.create(registry, config));
         }
 
         @Override

@@ -19,6 +19,8 @@ package io.helidon.extensions.langchain4j.webui;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import io.helidon.http.Status;
 import io.helidon.webclient.api.ClientResponseTyped;
@@ -43,9 +45,18 @@ class LangChain4jDevUiTest {
     private static final Jsonb JSONB = JsonbBuilder.create();
 
     private final WebClient client;
+    private final BrowserEchoAgent echoAgent;
+    private final BrowserMajordomoService majordomoService;
+    private final BrowserSlowWorkflowAgent slowWorkflowAgent;
 
-    LangChain4jDevUiTest(WebClient client) {
+    LangChain4jDevUiTest(WebClient client,
+                         BrowserEchoAgent echoAgent,
+                         BrowserMajordomoService majordomoService,
+                         BrowserSlowWorkflowAgent slowWorkflowAgent) {
         this.client = client;
+        this.echoAgent = echoAgent;
+        this.majordomoService = majordomoService;
+        this.slowWorkflowAgent = slowWorkflowAgent;
     }
 
     @Test
@@ -139,6 +150,61 @@ class LangChain4jDevUiTest {
         assertThat(lookupTool.get("kind"), equalTo("tool"));
         assertThat(lookupTool.get("owner"), equalTo("BrowserLookupTool"));
         assertThat(lookupTool.get("description"), equalTo("Looks up browser-side Helidon references"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> service = (Map<String, Object>) agents.stream()
+                .filter(Map.class::isInstance)
+                .map(Map.class::cast)
+                .filter(agent -> "browser-majordomo-service".equals(agent.get("name")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(service.get("kind"), equalTo("service"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> serviceMethods = (List<Map<String, Object>>) service.get("methods");
+        assertThat(serviceMethods.stream().map(method -> String.valueOf(method.get("id"))).toList(),
+                   hasItem("welcome(String)"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> serviceTools = (List<Map<String, Object>>) service.get("tools");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> serviceLookupTool = serviceTools.stream()
+                .filter(tool -> "lookupBrowserDocs".equals(tool.get("name")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(serviceLookupTool.get("kind"), equalTo("tool"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> inputGuardrail = serviceTools.stream()
+                .filter(tool -> "BrowserServiceInputGuardrail".equals(tool.get("name")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(inputGuardrail.get("kind"), equalTo("guardrail"));
+        assertThat(inputGuardrail.get("owner"), equalTo("Input guardrail"));
+        assertThat(inputGuardrail.get("description"), equalTo("Applies to all methods"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outputGuardrail = serviceTools.stream()
+                .filter(tool -> "BrowserServiceOutputGuardrail".equals(tool.get("name")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(outputGuardrail.get("kind"), equalTo("guardrail"));
+        assertThat(outputGuardrail.get("owner"), equalTo("Output guardrail"));
+        assertThat(outputGuardrail.get("description"), equalTo("Method: welcome"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> configuredAgent = (Map<String, Object>) agents.stream()
+                .filter(Map.class::isInstance)
+                .map(Map.class::cast)
+                .filter(agent -> "browser-echo-agent".equals(agent.get("name")))
+                .findFirst()
+                .orElseThrow();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> configuredAgentTools = (List<Map<String, Object>>) configuredAgent.get("tools");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> configuredOutputGuardrail = configuredAgentTools.stream()
+                .filter(tool -> "BrowserConfigOutputGuardrail".equals(tool.get("name")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(configuredOutputGuardrail.get("kind"), equalTo("guardrail"));
+        assertThat(configuredOutputGuardrail.get("owner"), equalTo("Output guardrail"));
+        assertThat(configuredOutputGuardrail.get("description"), equalTo("Configured in agent config"));
     }
 
     @Test
@@ -374,6 +440,109 @@ class LangChain4jDevUiTest {
     }
 
     @Test
+    void tracksAllAgentEventsOutsideBrowserInvocations() throws Exception {
+        Map<String, Object> enabled = setTracking(true);
+        assertThat(enabled.get("trackAllEvents"), equalTo(true));
+
+        try {
+            CompletableFuture<String> resultFuture = CompletableFuture.supplyAsync(() ->
+                    slowWorkflowAgent.ask("Track every event"));
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> running = waitForTracking(snapshot -> {
+                Object inspection = snapshot.get("inspection");
+                if (!(inspection instanceof Map<?, ?> inspectionMap)) {
+                    return false;
+                }
+                Object events = inspectionMap.get("events");
+                if (!(events instanceof List<?> eventList)) {
+                    return false;
+                }
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> typedEvents = (List<Map<String, Object>>) eventList;
+                return hasEvent(typedEvents, "before-agent", "browser-slow-workflow")
+                        && hasEvent(typedEvents, "before-agent", "browser-slow-echo")
+                        && !hasEvent(typedEvents, "after-agent", "browser-slow-echo");
+            });
+
+            assertThat(running.get("trackAllEvents"), equalTo(true));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> runningInspection = (Map<String, Object>) running.get("inspection");
+            assertThat(runningInspection, notNullValue());
+            assertThat(((List<?>) runningInspection.get("events")).size(), greaterThan(0));
+
+            assertThat(resultFuture.get(2, TimeUnit.SECONDS), equalTo("Echo: Slow workflow: Track every event"));
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> completed = waitForTracking(snapshot -> {
+                Object inspection = snapshot.get("inspection");
+                if (!(inspection instanceof Map<?, ?> inspectionMap)) {
+                    return false;
+                }
+                Object events = inspectionMap.get("events");
+                if (!(events instanceof List<?> eventList)) {
+                    return false;
+                }
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> typedEvents = (List<Map<String, Object>>) eventList;
+                return hasEvent(typedEvents, "after-agent", "browser-slow-workflow")
+                        && hasEvent(typedEvents, "after-agent", "browser-slow-echo");
+            });
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> completedInspection = (Map<String, Object>) completed.get("inspection");
+            assertThat(completedInspection, notNullValue());
+            assertThat(completedInspection.get("scopeAvailable"), equalTo(true));
+            assertThat(((List<?>) completedInspection.get("invocations")).size(), greaterThan(0));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> completedState = (Map<String, Object>) completedInspection.get("state");
+            assertThat(completedState.get("response"), equalTo("Echo: Slow workflow: Track every event"));
+        } finally {
+            Map<String, Object> disabled = setTracking(false);
+            assertThat(disabled.get("trackAllEvents"), equalTo(false));
+            assertThat(disabled.get("inspection"), equalTo(null));
+        }
+    }
+
+    @Test
+    void tracksTopLevelAiAgentEventsOutsideBrowserInvocations() throws Exception {
+        Map<String, Object> enabled = setTracking(true);
+        assertThat(enabled.get("trackAllEvents"), equalTo(true));
+
+        try {
+            assertThat(echoAgent.chat("browser-track-agent", "Track the root agent"),
+                       equalTo("Echo: Remember this: Track the root agent"));
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> completed = waitForTracking(snapshot -> {
+                Object inspection = snapshot.get("inspection");
+                if (!(inspection instanceof Map<?, ?> inspectionMap)) {
+                    return false;
+                }
+                Object events = inspectionMap.get("events");
+                if (!(events instanceof List<?> eventList)) {
+                    return false;
+                }
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> typedEvents = (List<Map<String, Object>>) eventList;
+                return hasEvent(typedEvents, "before-agent", "browser-echo-agent")
+                        && hasEvent(typedEvents, "after-agent", "browser-echo-agent");
+            });
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> inspection = (Map<String, Object>) completed.get("inspection");
+            assertThat(inspection, notNullValue());
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> events = (List<Map<String, Object>>) inspection.get("events");
+            assertThat(events.stream().map(event -> event.get("agent")).toList(), hasItem("browser-echo-agent"));
+        } finally {
+            Map<String, Object> disabled = setTracking(false);
+            assertThat(disabled.get("trackAllEvents"), equalTo(false));
+            assertThat(disabled.get("inspection"), equalTo(null));
+        }
+    }
+
+    @Test
     void invokesAgentWithEnumArgument() {
         LinkedHashMap<String, Object> invokeRequest = new LinkedHashMap<>();
         invokeRequest.put("agent", "browser-enum-agent");
@@ -420,6 +589,72 @@ class LangChain4jDevUiTest {
     }
 
     @Test
+    void invokesAiService() {
+        LinkedHashMap<String, Object> invokeRequest = new LinkedHashMap<>();
+        invokeRequest.put("agent", "browser-majordomo-service");
+        invokeRequest.put("method", "welcome(String)");
+        invokeRequest.put("arguments", Map.of("request", "tea"));
+
+        ClientResponseTyped<String> invokeResponse = client.post("/langchain4j/ui/api/invoke")
+                .submit(JSONB.toJson(invokeRequest), String.class);
+
+        assertThat(invokeResponse.status(), is(Status.OK_200));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> invoked = JSONB.fromJson(invokeResponse.entity(), LinkedHashMap.class);
+        assertThat(invoked.get("result"), equalTo("Echo: Majordomo request: tea"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> inspection = (Map<String, Object>) invoked.get("inspection");
+        assertThat(inspection, notNullValue());
+        assertThat(inspection.get("scopeAvailable"), equalTo(false));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> events = (List<Map<String, Object>>) inspection.get("events");
+        assertThat(events.size(), greaterThan(0));
+        assertThat(hasEvent(events, "before-agent", "browser-majordomo-service"), is(true));
+        assertThat(hasEvent(events, "after-agent", "browser-majordomo-service"), is(true));
+        assertThat(events.stream().map(event -> event.get("type")).toList(), hasItem("service-response"));
+    }
+
+    @Test
+    void tracksAllAiServiceEventsOutsideBrowserInvocations() throws Exception {
+        Map<String, Object> enabled = setTracking(true);
+        assertThat(enabled.get("trackAllEvents"), equalTo(true));
+
+        try {
+            assertThat(majordomoService.welcome("tea"), equalTo("Echo: Majordomo request: tea"));
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> completed = waitForTracking(snapshot -> {
+                Object inspection = snapshot.get("inspection");
+                if (!(inspection instanceof Map<?, ?> inspectionMap)) {
+                    return false;
+                }
+                Object events = inspectionMap.get("events");
+                if (!(events instanceof List<?> eventList)) {
+                    return false;
+                }
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> typedEvents = (List<Map<String, Object>>) eventList;
+                return hasEvent(typedEvents, "after-agent", "browser-majordomo-service")
+                        && typedEvents.stream().anyMatch(event -> "service-request".equals(event.get("type")))
+                        && typedEvents.stream().anyMatch(event -> "service-response".equals(event.get("type")))
+                        && typedEvents.stream().anyMatch(event -> "input-guardrail".equals(event.get("type")));
+            });
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> inspection = (Map<String, Object>) completed.get("inspection");
+            assertThat(inspection, notNullValue());
+            assertThat(inspection.get("scopeAvailable"), equalTo(false));
+            assertThat(inspection.get("result"), equalTo("Echo: Majordomo request: tea"));
+            assertThat(((List<?>) inspection.get("events")).size(), greaterThan(0));
+            assertThat(((List<?>) inspection.get("invocations")).size(), greaterThan(0));
+        } finally {
+            Map<String, Object> disabled = setTracking(false);
+            assertThat(disabled.get("trackAllEvents"), equalTo(false));
+            assertThat(disabled.get("inspection"), equalTo(null));
+        }
+    }
+
+    @Test
     void doesNotExposeSessionRoutes() {
         ClientResponseTyped<String> missingSessionList = client.get("/langchain4j/ui/api/agents/browser-agent/sessions")
                 .request(String.class);
@@ -445,6 +680,40 @@ class LangChain4jDevUiTest {
             Thread.sleep(25);
         }
         throw new AssertionError("Invocation did not reach expected state: " + latest);
+    }
+
+    private Map<String, Object> waitForTracking(java.util.function.Predicate<Map<String, Object>> condition)
+            throws Exception {
+        Map<String, Object> latest = null;
+        for (int attempt = 0; attempt < 60; attempt++) {
+            ClientResponseTyped<String> pollResponse = client.get("/langchain4j/ui/api/tracking")
+                    .request(String.class);
+
+            assertThat(pollResponse.status(), is(Status.OK_200));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> snapshot = JSONB.fromJson(pollResponse.entity(), LinkedHashMap.class);
+            latest = snapshot;
+            if (condition.test(snapshot)) {
+                return snapshot;
+            }
+            Thread.sleep(25);
+        }
+        throw new AssertionError("Tracking did not reach expected state: " + latest);
+    }
+
+    private Map<String, Object> setTracking(boolean enabled) {
+        ClientResponseTyped<String> response = client.post("/langchain4j/ui/api/tracking")
+                .submit(JSONB.toJson(Map.of("trackAllEvents", enabled)), String.class);
+
+        assertThat(response.status(), is(Status.OK_200));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> snapshot = JSONB.fromJson(response.entity(), LinkedHashMap.class);
+        return snapshot;
+    }
+
+    private static boolean hasEvent(List<Map<String, Object>> events, String type, String agent) {
+        return events.stream()
+                .anyMatch(event -> type.equals(event.get("type")) && agent.equals(event.get("agent")));
     }
 
     private static int indexOfEvent(List<Map<String, Object>> events,

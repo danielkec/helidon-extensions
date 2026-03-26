@@ -30,6 +30,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -43,10 +44,16 @@ import java.util.stream.IntStream;
 
 import io.helidon.builder.api.RuntimeType;
 import io.helidon.common.media.type.MediaTypes;
+import io.helidon.config.Config;
 import io.helidon.extensions.langchain4j.AgentMetadata;
+import io.helidon.extensions.langchain4j.AgentsConfig;
+import io.helidon.extensions.langchain4j.Ai;
 import io.helidon.http.HeaderNames;
 import io.helidon.http.Status;
+import io.helidon.service.registry.FactoryType;
+import io.helidon.service.registry.Lookup;
 import io.helidon.service.registry.ServiceRegistry;
+import io.helidon.service.registry.ServiceInfo;
 import io.helidon.service.registry.Services;
 import io.helidon.webserver.http.HttpRules;
 import io.helidon.webserver.http.HttpService;
@@ -71,6 +78,8 @@ import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.ParameterNameResolver;
 import dev.langchain4j.service.V;
+import dev.langchain4j.service.guardrail.InputGuardrails;
+import dev.langchain4j.service.guardrail.OutputGuardrails;
 
 /**
  * Browser-based development UI for Helidon-managed LangChain4j agents.
@@ -93,6 +102,7 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
     private final LangChain4jDevUiConfig config;
     private final ServiceRegistry registry;
     private final LangChain4jDevUiRecorder recorder;
+    private final Optional<Config> appConfig;
     private final Map<String, AgentHandle> agents;
     private final ConcurrentMap<String, InvocationJob> invocationJobs;
 
@@ -102,6 +112,7 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         this.config = Objects.requireNonNull(config);
         this.registry = Objects.requireNonNull(registry);
         this.recorder = Objects.requireNonNull(recorder);
+        this.appConfig = resolveAppConfig(registry);
         this.agents = Collections.unmodifiableMap(discoverAgents());
         this.invocationJobs = new ConcurrentHashMap<>();
     }
@@ -181,8 +192,10 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         String context = config.webContext();
         rules.get(context, this::redirectIndex)
                 .get(context + "/api/agents", this::listAgents)
+                .get(context + "/api/tracking", this::trackingStatus)
                 .post(context + "/api/invoke", this::invoke)
                 .post(context + "/api/invocations", this::startInvocation)
+                .post(context + "/api/tracking", this::updateTracking)
                 .get(context + "/api/invocations/{invocationId}", this::invocationStatus)
                 .register(context, StaticContentFeature.createService(ClasspathHandlerConfig.builder()
                                                                              .location(STATIC_LOCATION)
@@ -255,6 +268,26 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
             json(res, job.snapshot());
         } catch (DevUiException e) {
             error(res, e.status(), e.getMessage());
+        }
+    }
+
+    private void trackingStatus(ServerRequest req, ServerResponse res) {
+        json(res, trackingResponse());
+    }
+
+    private void updateTracking(ServerRequest req, ServerResponse res) {
+        try {
+            TrackingRequest request = LangChain4jDevUiJsonSupport.read(req.content().inputStream(), TrackingRequest.class);
+            if (request == null || request.trackAllEvents() == null) {
+                throw new DevUiException(Status.BAD_REQUEST_400, "trackAllEvents must be provided");
+            }
+
+            recorder.trackAllEvents(request.trackAllEvents());
+            json(res, trackingResponse());
+        } catch (DevUiException e) {
+            error(res, e.status(), e.getMessage());
+        } catch (Exception e) {
+            error(res, Status.INTERNAL_SERVER_ERROR_500, rootMessage(e));
         }
     }
 
@@ -366,6 +399,44 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                                                    LangChain4jDevUiRecorder.ProgressSnapshot progress) {
         LangChain4jDevUiRecorder.ScopeSnapshot scopeSnapshot = inspectionScope(null, progress.scopeSnapshot());
         return inspection(agent, method, normalizedInput, null, scopeSnapshot, progress.events());
+    }
+
+    private Map<String, Object> trackingResponse() {
+        boolean trackAllEvents = recorder.trackAllEvents();
+        LangChain4jDevUiRecorder.GlobalSnapshot snapshot = recorder.globalSnapshot();
+
+        LinkedHashMap<String, Object> response = new LinkedHashMap<>();
+        response.put("trackAllEvents", trackAllEvents);
+        if (trackAllEvents) {
+            response.put("inspection", trackingInspection(snapshot));
+        }
+        return response;
+    }
+
+    private Map<String, Object> trackingInspection(LangChain4jDevUiRecorder.GlobalSnapshot snapshot) {
+        List<Map<String, Object>> events = snapshot == null ? List.of() : snapshot.events();
+        LangChain4jDevUiRecorder.ScopeSnapshot scopeSnapshot = snapshot == null ? null : snapshot.scopeSnapshot();
+        Object result = latestAgentOutput(events);
+
+        if (result == null && scopeSnapshot != null) {
+            Object scopedResult = scopeResult(scopeSnapshot, events);
+            if (scopedResult != null) {
+                result = scopedResult;
+            }
+        }
+
+        scopeSnapshot = enrichInspectionScope(scopeSnapshot, result, events);
+        LinkedHashMap<String, Object> inspection = new LinkedHashMap<>(inspection(null,
+                                                                                   null,
+                                                                                   Map.of(),
+                                                                                   result,
+                                                                                   scopeSnapshot,
+                                                                                   events));
+        inspection.put("global", true);
+        if (snapshot != null && snapshot.lastUpdated() != null) {
+            inspection.put("lastUpdated", snapshot.lastUpdated().toString());
+        }
+        return inspection;
     }
 
     private Map<String, Object> inspection(AgentHandle agent,
@@ -516,7 +587,10 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                                                                              List<Map<String, Object>> invocations,
                                                                              List<Map<String, Object>> events) {
         LinkedHashMap<String, ConditionalRoutingDescriptor> descriptors = new LinkedHashMap<>();
-        conditionalRoutingDescriptor(agent, method.method()).ifPresent(descriptor -> descriptors.put(descriptor.key(), descriptor));
+        if (agent != null && method != null) {
+            conditionalRoutingDescriptor(agent, method.method()).ifPresent(descriptor -> descriptors.put(descriptor.key(),
+                                                                                                         descriptor));
+        }
 
         events.stream()
                 .filter(event -> event.get("agentType") instanceof String)
@@ -1017,11 +1091,82 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                 .sorted(Comparator.comparing(AgentMetadata::agentName))
                 .toList();
         discoveredMetadata.forEach(metadata -> agentNamesByType.put(metadata.agentClass(), metadata.agentName()));
+        List<ServiceCandidate> discoveredServices = discoverServices();
+        discoveredServices.forEach(service -> agentNamesByType.putIfAbsent(service.serviceType(), service.name()));
 
+        List<AgentHandle> handles = new ArrayList<>();
+        discoveredMetadata.forEach(metadata -> handles.add(new AgentHandle(metadata,
+                                                                           effectiveAgentConfig(metadata),
+                                                                           registry,
+                                                                           agentNamesByType)));
+        discoveredServices.forEach(service -> handles.add(new AgentHandle(service, registry, agentNamesByType)));
+        handles.sort(Comparator.comparing(AgentHandle::name));
         LinkedHashMap<String, AgentHandle> discovered = new LinkedHashMap<>();
-        discoveredMetadata.forEach(metadata -> discovered.put(metadata.agentName(),
-                                                              new AgentHandle(metadata, registry, agentNamesByType)));
+        handles.forEach(handle -> discovered.putIfAbsent(handle.name(), handle));
         return discovered;
+    }
+
+    private List<ServiceCandidate> discoverServices() {
+        LinkedHashMap<Class<?>, ServiceCandidate> discovered = new LinkedHashMap<>();
+        registry.lookupServices(Lookup.builder()
+                                      .addFactoryType(FactoryType.SUPPLIER)
+                                      .build())
+                .stream()
+                .map(ServiceInfo::providedType)
+                .map(LangChain4jDevUi::loadClass)
+                .flatMap(Optional::stream)
+                .filter(Class::isInterface)
+                .filter(type -> type.isAnnotationPresent(Ai.Service.class))
+                .forEach(type -> discovered.putIfAbsent(type, new ServiceCandidate(type, serviceName(type))));
+        return discovered.values()
+                .stream()
+                .sorted(Comparator.comparing(ServiceCandidate::name))
+                .toList();
+    }
+
+    private static Optional<Class<?>> loadClass(io.helidon.common.types.TypeName typeName) {
+        ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            return Optional.of(Class.forName(typeName.fqName(), false, contextClassLoader));
+        } catch (ClassNotFoundException | LinkageError ignored) {
+            try {
+                return Optional.of(Class.forName(typeName.fqName(), false, LangChain4jDevUi.class.getClassLoader()));
+            } catch (ClassNotFoundException | LinkageError ignoredAgain) {
+                return Optional.empty();
+            }
+        }
+    }
+
+    private static String serviceName(Class<?> serviceType) {
+        Ai.Service annotation = serviceType.getAnnotation(Ai.Service.class);
+        if (annotation == null || annotation.value().isBlank()) {
+            return serviceType.getName();
+        }
+        return annotation.value();
+    }
+
+    private AgentsConfig effectiveAgentConfig(AgentMetadata metadata) {
+        if (appConfig.isEmpty()) {
+            return metadata.buildTimeConfig();
+        }
+        return AgentsConfig.builder(metadata.buildTimeConfig())
+                .config(appConfig.get()
+                                .get("langchain4j")
+                                .get("agents")
+                                .get(metadata.agentName()))
+                .buildPrototype();
+    }
+
+    private static Optional<Config> resolveAppConfig(ServiceRegistry registry) {
+        try {
+            return Optional.of(registry.get(Config.class));
+        } catch (RuntimeException ignored) {
+            try {
+                return Optional.of(Services.get(Config.class));
+            } catch (RuntimeException ignoredAgain) {
+                return Optional.empty();
+            }
+        }
     }
 
     private static boolean isInvocable(Method method) {
@@ -1112,6 +1257,9 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
     }
 
     private static String agentKind(Class<?> agentType) {
+        if (agentType.isAnnotationPresent(Ai.Service.class)) {
+            return "service";
+        }
         if (Arrays.stream(agentType.getMethods())
                 .filter(LangChain4jDevUi::isInvocable)
                 .anyMatch(method -> method.isAnnotationPresent(ConditionalAgent.class))) {
@@ -1179,15 +1327,43 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         return List.copyOf(descriptors.values());
     }
 
-    private static List<ToolDescriptor> toolDescriptors(AgentMetadata metadata) {
+    private static List<ToolDescriptor> toolDescriptors(Class<?> agentType, AgentsConfig agentConfig) {
+        return toolDescriptors(agentType,
+                               agentConfig.tools(),
+                               agentConfig.toolProvider(),
+                               agentConfig.mcpClients(),
+                               agentConfig.inputGuardrails(),
+                               agentConfig.outputGuardrails());
+    }
+
+    private static List<ToolDescriptor> toolDescriptors(Class<?> serviceType) {
+        Ai.Tools tools = serviceType.getAnnotation(Ai.Tools.class);
+        Ai.ToolProvider toolProvider = serviceType.getAnnotation(Ai.ToolProvider.class);
+        Ai.McpClients mcpClients = serviceType.getAnnotation(Ai.McpClients.class);
+        return toolDescriptors(serviceType,
+                               tools == null ? List.of() : List.of(tools.value()),
+                               Optional.ofNullable(toolProvider).map(Ai.ToolProvider::value),
+                               mcpClients == null ? List.of() : Arrays.stream(mcpClients.value())
+                                       .filter(name -> !name.isBlank())
+                                       .toList(),
+                               List.of(),
+                               List.of());
+    }
+
+    private static List<ToolDescriptor> toolDescriptors(Class<?> componentType,
+                                                        java.util.Collection<? extends Class<?>> declaredTools,
+                                                        Optional<String> toolProviderName,
+                                                        java.util.Collection<String> mcpClientNames,
+                                                        java.util.Collection<? extends Class<?>> configuredInputGuardrails,
+                                                        java.util.Collection<? extends Class<?>> configuredOutputGuardrails) {
         LinkedHashMap<String, ToolDescriptor> descriptors = new LinkedHashMap<>();
 
-        metadata.buildTimeConfig().tools().stream()
+        declaredTools.stream()
                 .sorted(Comparator.comparing(Class::getName))
                 .forEach(toolType -> declaredToolDescriptors(toolType).forEach(descriptor -> descriptors.putIfAbsent(descriptor.key(),
                                                                                                                    descriptor)));
 
-        metadata.buildTimeConfig().toolProvider()
+        toolProviderName
                 .filter(providerName -> !providerName.isBlank())
                 .ifPresent(providerName -> descriptors.putIfAbsent("tool-provider::" + providerName,
                                                                    new ToolDescriptor("tool-provider",
@@ -1197,7 +1373,7 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                                                                                       providerName,
                                                                                       null)));
 
-        metadata.buildTimeConfig().mcpClients().stream()
+        mcpClientNames.stream()
                 .sorted()
                 .forEach(clientName -> descriptors.putIfAbsent("mcp-client::" + clientName,
                                                                new ToolDescriptor("mcp-client",
@@ -1207,7 +1383,80 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                                                                                   clientName,
                                                                                   null)));
 
+        guardrailDescriptors(componentType, configuredInputGuardrails, configuredOutputGuardrails)
+                .forEach(descriptor -> descriptors.putIfAbsent(descriptor.key(), descriptor));
+
         return List.copyOf(descriptors.values());
+    }
+
+    private static List<ToolDescriptor> guardrailDescriptors(Class<?> componentType,
+                                                             java.util.Collection<? extends Class<?>> configuredInputGuardrails,
+                                                             java.util.Collection<? extends Class<?>> configuredOutputGuardrails) {
+        LinkedHashMap<String, GuardrailDescriptorAccumulator> descriptors = new LinkedHashMap<>();
+
+        configuredInputGuardrails.stream()
+                .sorted(Comparator.comparing(Class::getName))
+                .forEach(guardrailType -> guardrailAccumulator(descriptors, "input", guardrailType).configured());
+        configuredOutputGuardrails.stream()
+                .sorted(Comparator.comparing(Class::getName))
+                .forEach(guardrailType -> guardrailAccumulator(descriptors, "output", guardrailType).configured());
+
+        mergeGuardrailAnnotation(descriptors, "input", componentType.getAnnotation(InputGuardrails.class), null);
+        mergeGuardrailAnnotation(descriptors, "output", componentType.getAnnotation(OutputGuardrails.class), null);
+
+        Arrays.stream(componentType.getMethods())
+                .filter(LangChain4jDevUi::isInvocable)
+                .sorted(Comparator.comparing(LangChain4jDevUi::methodId))
+                .forEach(method -> {
+                    mergeGuardrailAnnotation(descriptors, "input", method.getAnnotation(InputGuardrails.class), method.getName());
+                    mergeGuardrailAnnotation(descriptors, "output", method.getAnnotation(OutputGuardrails.class), method.getName());
+                });
+
+        return descriptors.values()
+                .stream()
+                .map(GuardrailDescriptorAccumulator::toDescriptor)
+                .toList();
+    }
+
+    private static void mergeGuardrailAnnotation(Map<String, GuardrailDescriptorAccumulator> descriptors,
+                                                 String direction,
+                                                 InputGuardrails annotation,
+                                                 String methodName) {
+        if (annotation == null) {
+            return;
+        }
+        mergeGuardrailTypes(descriptors, direction, annotation.value(), methodName);
+    }
+
+    private static void mergeGuardrailAnnotation(Map<String, GuardrailDescriptorAccumulator> descriptors,
+                                                 String direction,
+                                                 OutputGuardrails annotation,
+                                                 String methodName) {
+        if (annotation == null) {
+            return;
+        }
+        mergeGuardrailTypes(descriptors, direction, annotation.value(), methodName);
+    }
+
+    private static void mergeGuardrailTypes(Map<String, GuardrailDescriptorAccumulator> descriptors,
+                                            String direction,
+                                            Class<?>[] guardrailTypes,
+                                            String methodName) {
+        for (Class<?> guardrailType : guardrailTypes) {
+            GuardrailDescriptorAccumulator accumulator = guardrailAccumulator(descriptors, direction, guardrailType);
+            if (methodName == null) {
+                accumulator.classWide();
+            } else {
+                accumulator.method(methodName);
+            }
+        }
+    }
+
+    private static GuardrailDescriptorAccumulator guardrailAccumulator(Map<String, GuardrailDescriptorAccumulator> descriptors,
+                                                                      String direction,
+                                                                      Class<?> guardrailType) {
+        String key = "guardrail::" + direction + "::" + guardrailType.getName();
+        return descriptors.computeIfAbsent(key, ignored -> new GuardrailDescriptorAccumulator(direction, guardrailType));
     }
 
     private static List<ToolDescriptor> declaredToolDescriptors(Class<?> toolType) {
@@ -1489,24 +1738,47 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
         private final Object service;
         private final Map<String, AgentMethodHandle> methods;
 
-        private AgentHandle(AgentMetadata metadata,
-                            ServiceRegistry registry,
-                            Map<Class<?>, String> agentNamesByType) {
-            this.agentType = metadata.agentClass();
-            this.descriptor = new AgentDescriptor(metadata.agentName(),
-                                                  agentKind(metadata.agentClass()),
-                                                  metadata.agentClass().getName(),
-                                                  metadata.buildTimeConfig().description().orElse(null),
-                                                  methods(metadata.agentClass()),
-                                                  relationDescriptors(metadata.agentClass(), agentNamesByType),
-                                                  toolDescriptors(metadata));
-            this.service = registry.get(metadata.agentClass());
+        private AgentHandle(Class<?> agentType,
+                            AgentDescriptor descriptor,
+                            ServiceRegistry registry) {
+            this.agentType = agentType;
+            this.descriptor = descriptor;
+            this.service = registry.get(agentType);
             this.methods = this.descriptor.methods().stream()
                     .collect(java.util.stream.Collectors.toMap(MethodDescriptor::id,
-                                                               descriptor -> new AgentMethodHandle(
-                                                                       findMethod(metadata.agentClass(), descriptor.id()),
-                                                                       descriptor.parameters(),
-                                                                       descriptor.stateParameters())));
+                                                               methodDescriptor -> new AgentMethodHandle(
+                                                                       findMethod(agentType, methodDescriptor.id()),
+                                                                       methodDescriptor.parameters(),
+                                                                       methodDescriptor.stateParameters())));
+        }
+
+        private AgentHandle(AgentMetadata metadata,
+                            AgentsConfig effectiveConfig,
+                            ServiceRegistry registry,
+                            Map<Class<?>, String> agentNamesByType) {
+            this(metadata.agentClass(),
+                 new AgentDescriptor(metadata.agentName(),
+                                     agentKind(metadata.agentClass()),
+                                     metadata.agentClass().getName(),
+                                     metadata.buildTimeConfig().description().orElse(null),
+                                     methods(metadata.agentClass()),
+                                     relationDescriptors(metadata.agentClass(), agentNamesByType),
+                                     toolDescriptors(metadata.agentClass(), effectiveConfig)),
+                 registry);
+        }
+
+        private AgentHandle(ServiceCandidate service,
+                            ServiceRegistry registry,
+                            Map<Class<?>, String> agentNamesByType) {
+            this(service.serviceType(),
+                 new AgentDescriptor(service.name(),
+                                     agentKind(service.serviceType()),
+                                     service.serviceType().getName(),
+                                     null,
+                                     methods(service.serviceType()),
+                                     relationDescriptors(service.serviceType(), agentNamesByType),
+                                     toolDescriptors(service.serviceType())),
+                 registry);
         }
 
         private static List<MethodDescriptor> methods(Class<?> agentType) {
@@ -1614,6 +1886,56 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                                   String description) {
     }
 
+    private record ServiceCandidate(Class<?> serviceType,
+                                    String name) {
+    }
+
+    private static final class GuardrailDescriptorAccumulator {
+        private final String direction;
+        private final Class<?> guardrailType;
+        private boolean configured;
+        private boolean classWide;
+        private final Set<String> methods = new LinkedHashSet<>();
+
+        private GuardrailDescriptorAccumulator(String direction, Class<?> guardrailType) {
+            this.direction = direction;
+            this.guardrailType = guardrailType;
+        }
+
+        private void configured() {
+            configured = true;
+        }
+
+        private void classWide() {
+            classWide = true;
+        }
+
+        private void method(String methodName) {
+            methods.add(methodName);
+        }
+
+        private ToolDescriptor toDescriptor() {
+            List<String> descriptionParts = new ArrayList<>();
+            if (configured) {
+                descriptionParts.add("Configured in agent config");
+            }
+            if (classWide) {
+                descriptionParts.add("Applies to all methods");
+            } else if (!methods.isEmpty()) {
+                descriptionParts.add(methods.size() == 1
+                                             ? "Method: " + methods.iterator().next()
+                                             : "Methods: " + String.join(", ", methods));
+            }
+
+            return new ToolDescriptor("guardrail",
+                                      "guardrail::" + direction + "::" + guardrailType.getName(),
+                                      guardrailType.getSimpleName(),
+                                      direction.equals("input") ? "Input guardrail" : "Output guardrail",
+                                      guardrailType.getName(),
+                                      descriptionParts.isEmpty() ? null : String.join(" • ", descriptionParts));
+        }
+    }
+
     private record MethodDescriptor(String id,
                                     String name,
                                     String returnType,
@@ -1628,6 +1950,9 @@ public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<Lang
                                        boolean memoryId,
                                        boolean simpleText,
                                        List<String> enumValues) {
+    }
+
+    public record TrackingRequest(Boolean trackAllEvents) {
     }
 
     public record InvokeRequest(String agent,

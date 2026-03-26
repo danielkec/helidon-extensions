@@ -1,0 +1,5 @@
+langchain4j:
+  agents:
+    browser-echo-agent:
+      output-guardrails:
+        - io.helidon.extensions.langchain4j.webui.BrowserConfigOutputGuardrail

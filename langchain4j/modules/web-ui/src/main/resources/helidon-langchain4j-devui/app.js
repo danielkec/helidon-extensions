@@ -2,10 +2,25 @@ const state = {
     agents: [],
     selectedAgent: null,
     selectedMethod: null,
-    conversations: {}
+    conversations: {},
+    inspector: {
+        markup: {
+            state: null,
+            trace: null,
+            event: null
+        }
+    },
+    tracking: {
+        enabled: false,
+        inspection: null,
+        loading: false,
+        polling: false,
+        timerId: null
+    }
 };
 
 const INVOCATION_POLL_INTERVAL_MS = 180;
+const TRACKING_POLL_INTERVAL_MS = 240;
 const AGENT_GRAPH_LAYOUT = Object.freeze({
     paddingX: 18,
     paddingY: 18,
@@ -29,9 +44,13 @@ const basePath = (() => {
 })();
 
 const agentList = document.getElementById("agent-list");
+const appLayout = document.getElementById("app-layout");
 const refreshAgentsButton = document.getElementById("refresh-agents");
+const trackingToggle = document.getElementById("tracking-toggle");
+const trackingToggleLabel = document.getElementById("tracking-toggle-label");
 const methodSelect = document.getElementById("method-select");
 const invokeForm = document.getElementById("invoke-form");
+const workspacePanel = document.getElementById("workspace-panel");
 const workspaceTitle = document.getElementById("workspace-title");
 const conversationTitle = document.getElementById("conversation-title");
 const conversationProgress = document.getElementById("conversation-progress");
@@ -158,6 +177,11 @@ const YAML_NULL_LITERALS = new Set(["null", "~"]);
 if (refreshAgentsButton) {
     refreshAgentsButton.addEventListener("click", loadAgents);
 }
+if (trackingToggle) {
+    trackingToggle.addEventListener("click", () => {
+        toggleTracking().catch(showError);
+    });
+}
 clearConversationButton.addEventListener("click", clearConversation);
 invokeForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -192,7 +216,14 @@ document.querySelectorAll(".tab-button").forEach((button) => {
     button.addEventListener("click", () => switchTab(button.dataset.tab));
 });
 
-loadAgents().catch(showError);
+initialize().catch(showError);
+
+async function initialize() {
+    renderTrackingToggle();
+    syncTrackingLayout();
+    await loadAgents();
+    await loadTrackingStatus();
+}
 
 async function api(path, options = {}) {
     const response = await fetch(`${basePath}${path}`, {
@@ -233,6 +264,125 @@ async function loadAgents() {
     renderWorkspace();
 }
 
+async function loadTrackingStatus() {
+    const response = await api("/api/tracking", {headers: {}});
+    applyTrackingResponse(response);
+    renderInspector();
+    if (state.tracking.enabled) {
+        scheduleTrackingPoll();
+    }
+}
+
+async function toggleTracking() {
+    if (state.tracking.loading) {
+        return;
+    }
+
+    state.tracking.loading = true;
+    renderTrackingToggle();
+
+    try {
+        const response = await api("/api/tracking", {
+            method: "POST",
+            body: JSON.stringify({
+                trackAllEvents: !state.tracking.enabled
+            })
+        });
+        applyTrackingResponse(response);
+        if (state.tracking.enabled) {
+            scheduleTrackingPoll(0);
+            toastMessage("Tracking all agent events");
+        } else {
+            stopTrackingPolling({clearInspection: true});
+            toastMessage("Stopped tracking app-wide agent events");
+        }
+        renderInspector();
+    } finally {
+        state.tracking.loading = false;
+        renderTrackingToggle();
+    }
+}
+
+function applyTrackingResponse(response) {
+    const wasEnabled = state.tracking.enabled;
+    state.tracking.enabled = Boolean(response?.trackAllEvents);
+    state.tracking.inspection = response?.inspection || null;
+    renderTrackingToggle();
+    syncTrackingLayout();
+    if (!wasEnabled && state.tracking.enabled) {
+        ensureTrackingTabVisible();
+    }
+}
+
+function renderTrackingToggle() {
+    if (!trackingToggle) {
+        return;
+    }
+
+    trackingToggle.classList.toggle("is-active", state.tracking.enabled);
+    trackingToggle.classList.toggle("is-loading", state.tracking.loading);
+    trackingToggle.setAttribute("aria-pressed", state.tracking.enabled ? "true" : "false");
+    trackingToggle.disabled = state.tracking.loading;
+    trackingToggle.title = state.tracking.enabled
+        ? "Showing app-wide agent events, trace, and state in the inspector."
+        : "Track agent events triggered outside browser-started invocations.";
+    trackingToggleLabel.textContent = state.tracking.loading
+        ? state.tracking.enabled ? "Stopping..." : "Starting..."
+        : state.tracking.enabled ? "Tracking all events" : "Track all events";
+}
+
+function syncTrackingLayout() {
+    const trackingAllEvents = state.tracking.enabled;
+    if (appLayout) {
+        appLayout.classList.toggle("is-tracking-all", trackingAllEvents);
+    }
+    if (workspacePanel) {
+        workspacePanel.hidden = trackingAllEvents;
+        workspacePanel.setAttribute("aria-hidden", trackingAllEvents ? "true" : "false");
+    }
+}
+
+function scheduleTrackingPoll(delayMs = TRACKING_POLL_INTERVAL_MS) {
+    window.clearTimeout(state.tracking.timerId);
+    state.tracking.timerId = null;
+    if (!state.tracking.enabled) {
+        return;
+    }
+    state.tracking.timerId = window.setTimeout(() => {
+        pollTracking().catch(showError);
+    }, delayMs);
+}
+
+function stopTrackingPolling({clearInspection = false} = {}) {
+    window.clearTimeout(state.tracking.timerId);
+    state.tracking.timerId = null;
+    state.tracking.polling = false;
+    if (clearInspection) {
+        state.tracking.inspection = null;
+    }
+}
+
+async function pollTracking() {
+    if (!state.tracking.enabled || state.tracking.polling) {
+        return;
+    }
+
+    state.tracking.polling = true;
+    try {
+        const response = await api("/api/tracking", {headers: {}});
+        applyTrackingResponse(response);
+        renderInspector();
+        if (!state.tracking.enabled) {
+            stopTrackingPolling({clearInspection: true});
+            return;
+        }
+    } finally {
+        state.tracking.polling = false;
+    }
+
+    scheduleTrackingPoll();
+}
+
 function selectAgent(agentName) {
     state.selectedAgent = state.agents.find((agent) => agent.name === agentName) || null;
     state.selectedMethod = state.selectedAgent?.methods[0] || null;
@@ -251,7 +401,7 @@ function selectMethod(methodId) {
 
 function renderAgents() {
     if (state.agents.length === 0) {
-        agentList.innerHTML = `<div class="empty-state">No LangChain4j agents were discovered.</div>`;
+        agentList.innerHTML = `<div class="empty-state">No LangChain4j agents or services were discovered.</div>`;
         return;
     }
 
@@ -261,6 +411,8 @@ function renderAgents() {
     agentList.querySelectorAll("button[data-agent]").forEach((button) => {
         button.addEventListener("click", () => selectAgent(button.dataset.agent));
     });
+
+    syncAgentGraphActivity();
 }
 
 function buildAgentGraph(agents) {
@@ -310,7 +462,7 @@ function buildAgentGraph(agents) {
                     key: edgeKey,
                     sourceKey,
                     targetKey: toolNode.key,
-                    kind: "tool",
+                    kind: tool.kind === "guardrail" ? "guardrail" : "tool",
                     label: tool.owner || tool.kind || "tool",
                     detail: tool.description || ""
                 });
@@ -383,19 +535,26 @@ function agentGraphAgentKey(name) {
 }
 
 function agentGraphAgentMeta(agent) {
-    const summary = [
-        `${agent.methods?.length || 0} method${(agent.methods?.length || 0) === 1 ? "" : "s"}`
-    ];
+    const tools = agent.tools || [];
+    const guardrailCount = tools.filter((tool) => tool.kind === "guardrail").length;
+    const toolCount = tools.filter((tool) => tool.kind !== "guardrail").length;
+    const summary = [`${agent.methods?.length || 0} method${(agent.methods?.length || 0) === 1 ? "" : "s"}`];
     if ((agent.relations || []).length > 0) {
         summary.push(`${agent.relations.length} link${agent.relations.length === 1 ? "" : "s"}`);
     }
-    if ((agent.tools || []).length > 0) {
-        summary.push(`${agent.tools.length} tool${agent.tools.length === 1 ? "" : "s"}`);
+    if (toolCount > 0) {
+        summary.push(`${toolCount} tool${toolCount === 1 ? "" : "s"}`);
+    }
+    if (guardrailCount > 0) {
+        summary.push(`${guardrailCount} guardrail${guardrailCount === 1 ? "" : "s"}`);
     }
     return summary.join(" • ");
 }
 
 function agentGraphKindLabel(kind) {
+    if (kind === "service") {
+        return "AI service";
+    }
     if (kind === "router") {
         return "Conditional agent";
     }
@@ -406,6 +565,9 @@ function agentGraphKindLabel(kind) {
 }
 
 function agentGraphToolMeta(tool) {
+    if (tool.kind === "guardrail") {
+        return tool.owner || "Guardrail";
+    }
     if (tool.kind === "mcp-client") {
         return "MCP client";
     }
@@ -667,7 +829,9 @@ function renderAgentGraph(graph) {
             </div>
             <div class="agent-graph-legend">
                 <span class="agent-graph-legend-item is-agent">Agent</span>
+                <span class="agent-graph-legend-item is-service">Service</span>
                 <span class="agent-graph-legend-item is-router">Conditional</span>
+                <span class="agent-graph-legend-item is-guardrail">Guardrail</span>
                 <span class="agent-graph-legend-item is-tool">Tool</span>
             </div>
         </div>
@@ -702,6 +866,7 @@ function renderAgentGraphNode(node) {
         <span class="agent-graph-node-topline">
             <span class="agent-graph-node-icon" aria-hidden="true">${agentGraphNodeIcon(node)}</span>
             <span class="agent-graph-node-type">${escapeHtml(agentGraphNodeType(node))}</span>
+            <span class="agent-graph-node-spinner" aria-hidden="true"></span>
         </span>
         <span class="agent-graph-node-label">${escapeHtml(node.name)}</span>
         <span class="agent-graph-node-meta">${escapeHtml(node.meta)}</span>
@@ -711,14 +876,28 @@ function renderAgentGraphNode(node) {
 
     if (node.selectable) {
         return `
-            <button type="button" class="${classes.join(" ")}" data-agent="${escapeHtml(node.name)}" style="${style}" title="${title}">
+            <button
+                type="button"
+                class="${classes.join(" ")}"
+                data-agent="${escapeHtml(node.name)}"
+                data-node-key="${escapeHtml(node.key)}"
+                data-node-kind="${escapeHtml(node.nodeKind)}"
+                data-node-category="${escapeHtml(node.category || "agent")}"
+                style="${style}"
+                title="${title}">
                 ${content}
             </button>
         `;
     }
 
     return `
-        <div class="${classes.join(" ")}" style="${style}" title="${title}">
+        <div
+            class="${classes.join(" ")}"
+            data-node-key="${escapeHtml(node.key)}"
+            data-node-kind="${escapeHtml(node.nodeKind)}"
+            data-node-category="${escapeHtml(node.category || "agent")}"
+            style="${style}"
+            title="${title}">
             ${content}
         </div>
     `;
@@ -726,6 +905,9 @@ function renderAgentGraphNode(node) {
 
 function agentGraphNodeIcon(node) {
     if (node.nodeKind === "tool") {
+        if (node.category === "guardrail") {
+            return "🛡️";
+        }
         if (node.category === "mcp-client") {
             return "🌐";
         }
@@ -737,11 +919,17 @@ function agentGraphNodeIcon(node) {
     if (node.category === "router") {
         return "🧭";
     }
+    if (node.category === "service") {
+        return "✨";
+    }
     return "🤖";
 }
 
 function agentGraphNodeType(node) {
     if (node.nodeKind === "tool") {
+        if (node.category === "guardrail") {
+            return "Guardrail";
+        }
         if (node.category === "mcp-client") {
             return "MCP";
         }
@@ -752,6 +940,9 @@ function agentGraphNodeType(node) {
     }
     if (node.category === "router") {
         return "Router";
+    }
+    if (node.category === "service") {
+        return "Service";
     }
     if (node.category === "workflow") {
         return "Flow";
@@ -765,9 +956,11 @@ function agentGraphNodeTitle(node) {
 }
 
 function agentGraphEdgeTitle(edge) {
-    const relation = edge.kind === "tool"
-        ? `${edge.sourceName} uses ${edge.targetName}`
-        : edge.kind === "conditional"
+    const relation = edge.kind === "guardrail"
+        ? `${edge.sourceName} is protected by ${edge.targetName}`
+        : edge.kind === "tool"
+            ? `${edge.sourceName} uses ${edge.targetName}`
+            : edge.kind === "conditional"
             ? `${edge.sourceName} conditionally routes to ${edge.targetName}`
             : `${edge.sourceName} invokes ${edge.targetName}`;
     const label = edge.label ? `\nVia: ${edge.label}` : "";
@@ -870,46 +1063,85 @@ function renderInvocationForm() {
 
 function renderResult() {
     const conversation = currentConversation();
-    const result = conversation?.lastResponse?.result;
+    const inspection = activeInspection(conversation);
+    const result = state.tracking.enabled
+        ? inspection?.result
+        : conversation?.lastResponse?.result;
     const runCount = conversation?.runCount || 0;
     const lastEntry = conversation?.entries?.[conversation.entries.length - 1] || null;
+    const trackedEvents = inspection?.events || [];
+    const trackedInvocations = inspection?.invocations || [];
 
-    if (conversation?.pending) {
-        resultSummary.textContent = "Waiting for response...";
-    } else if (lastEntry?.meta === "Request failed" && runCount === 0) {
-        resultSummary.textContent = "Last request failed";
-    } else if (!state.selectedMethod || runCount === 0) {
-        resultSummary.textContent = state.selectedMethod?.chatLike ? "No conversation yet" : "No invocations yet";
-    } else if (state.selectedMethod.chatLike) {
-        resultSummary.textContent = `${runCount} turn${runCount === 1 ? "" : "s"}`;
+    if (state.tracking.enabled) {
+        if (conversation?.pending) {
+            resultSummary.textContent = "Waiting for response • tracking app-wide";
+        } else if (trackedEvents.length > 0) {
+            resultSummary.textContent = `Tracking ${trackedEvents.length} event${trackedEvents.length === 1 ? "" : "s"}`;
+        } else if (trackedInvocations.length > 0) {
+            resultSummary.textContent = `Tracking ${trackedInvocations.length} invocation${trackedInvocations.length === 1 ? "" : "s"}`;
+        } else {
+            resultSummary.textContent = "Tracking app-wide events";
+        }
     } else {
-        resultSummary.textContent = `${runCount} invocation${runCount === 1 ? "" : "s"}`;
+        if (conversation?.pending) {
+            resultSummary.textContent = "Waiting for response...";
+        } else if (lastEntry?.meta === "Request failed" && runCount === 0) {
+            resultSummary.textContent = "Last request failed";
+        } else if (!state.selectedMethod || runCount === 0) {
+            resultSummary.textContent = state.selectedMethod?.chatLike ? "No conversation yet" : "No invocations yet";
+        } else if (state.selectedMethod.chatLike) {
+            resultSummary.textContent = `${runCount} turn${runCount === 1 ? "" : "s"}`;
+        } else {
+            resultSummary.textContent = `${runCount} invocation${runCount === 1 ? "" : "s"}`;
+        }
     }
 
     resultView.textContent = result !== undefined && result !== null
         ? pretty(result)
-        : "Run a method to inspect the latest raw result.";
+        : state.tracking.enabled
+            ? "Tracking all agent events. The latest normalized result will appear here."
+            : "Run a method to inspect the latest raw result.";
+}
+
+function activeInspection(conversation = currentConversation()) {
+    if (state.tracking.enabled) {
+        return state.tracking.inspection;
+    }
+    return conversation?.inspection || null;
+}
+
+function activeProgressEvents(conversation = currentConversation()) {
+    const inspection = activeInspection(conversation);
+    if (state.tracking.enabled) {
+        return inspection?.events || [];
+    }
+    if (conversation?.pending) {
+        return conversation.progressEvents || [];
+    }
+    return conversation?.inspection?.events || conversation?.progressEvents || [];
 }
 
 function renderConversationProgress(conversation = currentConversation()) {
-    if (!state.selectedMethod) {
+    if (!state.selectedMethod && !state.tracking.enabled) {
         conversationProgress.innerHTML = `<div class="run-progress-empty">Select an agent method to see live progress.</div>`;
         return;
     }
 
-    const events = conversation?.pending
-        ? (conversation.progressEvents || [])
-        : (conversation?.inspection?.events || conversation?.progressEvents || []);
+    const monitoringAllEvents = state.tracking.enabled;
+    const events = activeProgressEvents(conversation);
     const steps = buildRunProgressSteps(events);
 
     if (!steps.length) {
-        const text = conversation?.pending
-            ? "Waiting for first event..."
-            : conversation?.runCount
-                ? "No agent or tool events captured."
-                : "Progress appears here during agentic runs.";
-        const pendingClass = conversation?.pending ? " is-pending" : "";
-        const pendingDot = conversation?.pending
+        const text = monitoringAllEvents
+            ? "Tracking all agent events. Waiting for activity..."
+            : conversation?.pending
+                ? "Waiting for first event..."
+                : conversation?.runCount
+                    ? "No agent or tool events captured."
+                    : "Progress appears here during agentic runs.";
+        const showPending = monitoringAllEvents || conversation?.pending;
+        const pendingClass = showPending ? " is-pending" : "";
+        const pendingDot = showPending
             ? `<span class="run-progress-empty-dot" aria-hidden="true"></span>`
             : "";
         conversationProgress.innerHTML = `
@@ -932,6 +1164,24 @@ function renderConversationProgress(conversation = currentConversation()) {
             </div>
         </div>
     `;
+}
+
+function syncAgentGraphActivity(conversation = currentConversation()) {
+    const graphNodes = agentList?.querySelectorAll(".agent-graph-node[data-node-key]");
+    if (!graphNodes?.length) {
+        return;
+    }
+
+    const selectedAgentKey = state.selectedAgent ? agentGraphAgentKey(state.selectedAgent.name) : "";
+    const runningNodeKeys = buildAgentGraphRunningNodeKeys(activeProgressEvents(conversation));
+
+    graphNodes.forEach((node) => {
+        const nodeKey = node.dataset.nodeKey || "";
+        const running = runningNodeKeys.has(nodeKey);
+        node.classList.toggle("is-active", nodeKey === selectedAgentKey);
+        node.classList.toggle("is-running", running);
+        node.setAttribute("aria-busy", running ? "true" : "false");
+    });
 }
 
 const RUN_PROGRESS_ROW_SIZE = 3;
@@ -982,6 +1232,28 @@ function buildRunProgressRows(steps, rowSize = RUN_PROGRESS_ROW_SIZE) {
         rows.push(createRunProgressRow(steps.slice(start, start + rowSize), rows.length));
     }
     return rows;
+}
+
+function buildAgentGraphRunningNodeKeys(events) {
+    const runningNodeKeys = new Set();
+    buildRunProgressSteps(events).forEach((step) => {
+        if (step.status !== "running") {
+            return;
+        }
+
+        const nodeKey = agentGraphRunningNodeKey(step);
+        if (nodeKey) {
+            runningNodeKeys.add(nodeKey);
+        }
+    });
+    return runningNodeKeys;
+}
+
+function agentGraphRunningNodeKey(step) {
+    if (!step || step.kind === "tool" || !step.name) {
+        return "";
+    }
+    return agentGraphAgentKey(step.name);
 }
 
 function createRunProgressRow(logicalSteps, rowIndex) {
@@ -1212,33 +1484,72 @@ function runProgressStepTitle(step) {
 
 function renderInspector() {
     const conversation = currentConversation();
-    const inspection = conversation?.inspection || null;
+    const monitoringAllEvents = state.tracking.enabled;
+    const inspection = activeInspection(conversation);
     renderConversationProgress(conversation);
+    syncAgentGraphActivity(conversation);
 
-    const hasInspectableInvocation = Boolean(conversation)
-        && (conversation.runCount > 0 || conversation.pending || inspection);
+    const hasInspectableInvocation = monitoringAllEvents
+        || (Boolean(conversation) && (conversation.runCount > 0 || conversation.pending || inspection));
 
-    if (!state.selectedMethod || !hasInspectableInvocation) {
+    if ((!state.selectedMethod && !monitoringAllEvents) || !hasInspectableInvocation) {
         stateStatus.textContent = "No scope";
-        stateView.innerHTML = `<div class="empty-state">Run a method to inspect the latest state snapshot.</div>`;
-        traceView.innerHTML = `<div class="empty-state">Run a method to inspect the latest invocation trace.</div>`;
-        eventView.innerHTML = `<div class="empty-state">Run a method to inspect the latest event log.</div>`;
+        setInspectorPanelHtml(stateView,
+                              `<div class="empty-state">Run a method to inspect the latest state snapshot.</div>`,
+                              "state");
+        setInspectorPanelHtml(traceView,
+                              `<div class="empty-state">Run a method to inspect the latest invocation trace.</div>`,
+                              "trace");
+        setInspectorPanelHtml(eventView,
+                              `<div class="empty-state">Run a method to inspect the latest event log.</div>`,
+                              "event");
         traceCount.textContent = "0 invocations";
         eventCount.textContent = "0 events";
         return;
     }
 
-    stateStatus.textContent = inspection?.scopeAvailable ? "Scope available" : "No scope";
-    stateView.innerHTML = inspection?.scopeAvailable
+    if (monitoringAllEvents && !inspection) {
+        stateStatus.textContent = "Tracking app-wide";
+        setInspectorPanelHtml(stateView,
+                              `<div class="empty-state">Tracking all agent events. Waiting for the first scope snapshot.</div>`,
+                              "state");
+        setInspectorPanelHtml(traceView,
+                              `<div class="empty-state">Tracking all agent events. Invocation trace will appear here.</div>`,
+                              "trace");
+        setInspectorPanelHtml(eventView,
+                              `<div class="empty-state">Tracking all agent events. Event log will appear here.</div>`,
+                              "event");
+        traceCount.textContent = "0 invocations";
+        eventCount.textContent = "0 events";
+        return;
+    }
+
+    stateStatus.textContent = monitoringAllEvents
+        ? inspection?.scopeAvailable ? "Tracking app-wide • scope available" : "Tracking app-wide"
+        : inspection?.scopeAvailable ? "Scope available" : "No scope";
+    setInspectorPanelHtml(stateView, inspection?.scopeAvailable
         ? renderStateSnapshot(inspection.state || {})
-        : `<div class="empty-state">This invocation did not expose an agentic scope. Plain leaf agents and non-agentic methods will not populate state.</div>`;
+        : monitoringAllEvents
+            ? `<div class="empty-state">The latest tracked invocation did not expose an agentic scope. Plain leaf agents and non-agentic methods will not populate state.</div>`
+            : `<div class="empty-state">This invocation did not expose an agentic scope. Plain leaf agents and non-agentic methods will not populate state.</div>`,
+        "state");
 
     const invocations = inspection?.invocations || [];
     const events = inspection?.events || [];
     traceCount.textContent = `${invocations.length} invocation${invocations.length === 1 ? "" : "s"}`;
     eventCount.textContent = `${events.length} event${events.length === 1 ? "" : "s"}`;
-    traceView.innerHTML = renderTimeline(invocations, "invocation");
-    eventView.innerHTML = renderTimeline(events, "event");
+    setInspectorPanelHtml(traceView, renderTimeline(invocations, "invocation"), "trace");
+    setInspectorPanelHtml(eventView, renderTimeline(events, "event"), "event");
+}
+
+function ensureTrackingTabVisible() {
+    if (currentTabName() !== "events") {
+        switchTab("events");
+    }
+}
+
+function currentTabName() {
+    return document.querySelector(".tab-button.is-active")?.dataset.tab || "state";
 }
 
 function renderTimeline(items, kind) {
@@ -1253,45 +1564,47 @@ function renderTimeline(items, kind) {
 }
 
 function renderInvocationTimelineCard(item) {
+    const cardKey = timelineCardKey(item, "invocation");
     const title = `${escapeHtml(item.agentName || "agent")} • ${escapeHtml(item.agentId || "")}`;
     const meta = escapeHtml(item.agentType || "");
     const details = invocationDetailEntries(item);
 
     return `
-        <article class="timeline-card">
+        <article class="timeline-card" data-card-key="${escapeHtml(cardKey)}">
             <div class="timeline-title">
                 <span>${title}</span>
             </div>
             <div class="timeline-meta">${meta}</div>
-            ${renderEventDetails(details)}
+            ${renderEventDetails(details, cardKey)}
         </article>
     `;
 }
 
 function renderEventTimelineCard(item) {
+    const cardKey = timelineCardKey(item, "event");
     const title = `${escapeHtml(item.type || "event")} • ${escapeHtml(item.agent || item.tool || "")}`;
     const meta = escapeHtml(item.timestamp || "");
     const details = eventDetailEntries(item);
 
     return `
-        <article class="timeline-card">
+        <article class="timeline-card" data-card-key="${escapeHtml(cardKey)}">
             <div class="timeline-title">
                 <span>${title}</span>
             </div>
             <div class="timeline-meta">${meta}</div>
-            ${renderEventDetails(details)}
+            ${renderEventDetails(details, cardKey)}
         </article>
     `;
 }
 
-function renderEventDetails(entries) {
+function renderEventDetails(entries, ownerKey = "") {
     if (!entries.length) {
         return `<div class="empty-state">No additional event details.</div>`;
     }
 
     return `
         <ul class="event-detail-list">
-            ${entries.map(([name, value]) => renderEventDetailItem(name, value)).join("")}
+            ${entries.map(([name, value]) => renderEventDetailItem(name, value, ownerKey)).join("")}
         </ul>
     `;
 }
@@ -1306,12 +1619,13 @@ function invocationDetailEntries(item) {
         .filter(([name, value]) => !["agentType", "agentName", "agentId"].includes(name) && value !== undefined);
 }
 
-function renderEventDetailItem(name, value) {
-    return renderCompactDetailItem(name, value);
+function renderEventDetailItem(name, value, ownerKey = "") {
+    return renderCompactDetailItem(name, value, ownerKey);
 }
 
-function renderCompactDetailItem(name, value) {
+function renderCompactDetailItem(name, value, ownerKey = "") {
     const inlineValue = renderEventInlineValue(value);
+    const detailKey = compactDetailKey(ownerKey, name);
     return `
         <li class="event-detail-item state-variable-item">
             ${inlineValue
@@ -1322,7 +1636,7 @@ function renderCompactDetailItem(name, value) {
                     </div>
                 `
                 : `
-                    <details class="event-detail-section">
+                    <details class="event-detail-section" data-detail-key="${escapeHtml(detailKey)}">
                         <summary>
                             <span class="event-detail-name">${escapeHtml(name)}:</span>
                             <span class="event-detail-summary">${escapeHtml(stateValueSummary(value))}</span>
@@ -1376,7 +1690,66 @@ function renderStateSnapshot(stateData) {
 }
 
 function renderStateVariable(name, value) {
-    return renderCompactDetailItem(name, value);
+    return renderCompactDetailItem(name, value, "state");
+}
+
+function setInspectorPanelHtml(element, html, cacheKey) {
+    if (!element) {
+        return;
+    }
+    if (state.inspector.markup[cacheKey] === html) {
+        return;
+    }
+
+    const openDetailKeys = captureOpenDetailKeys(element);
+    const previousScrollTop = element.scrollTop;
+    state.inspector.markup[cacheKey] = html;
+    element.innerHTML = html;
+    restoreOpenDetailKeys(element, openDetailKeys);
+    if (previousScrollTop > 0) {
+        element.scrollTop = Math.min(previousScrollTop, Math.max(0, element.scrollHeight - element.clientHeight));
+    }
+}
+
+function captureOpenDetailKeys(container) {
+    return new Set(Array.from(container.querySelectorAll("details[data-detail-key][open]"))
+        .map((detail) => detail.dataset.detailKey)
+        .filter(Boolean));
+}
+
+function restoreOpenDetailKeys(container, openDetailKeys) {
+    if (!openDetailKeys || openDetailKeys.size === 0) {
+        return;
+    }
+    container.querySelectorAll("details[data-detail-key]").forEach((detail) => {
+        if (openDetailKeys.has(detail.dataset.detailKey)) {
+            detail.open = true;
+        }
+    });
+}
+
+function compactDetailKey(ownerKey, name) {
+    return ownerKey ? `${ownerKey}::${name}` : name;
+}
+
+function timelineCardKey(item, kind) {
+    if (kind === "invocation") {
+        return [
+            "invocation",
+            item?.agentId || "",
+            item?.agentName || "",
+            item?.agentType || ""
+        ].join("::");
+    }
+    return [
+        "event",
+        item?.timestamp || "",
+        item?.type || "",
+        item?.agentId || "",
+        item?.agent || "",
+        item?.toolId || "",
+        item?.tool || ""
+    ].join("::");
 }
 
 function stateValueSummary(value) {
