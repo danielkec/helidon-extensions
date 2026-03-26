@@ -82,7 +82,7 @@ import dev.langchain4j.service.guardrail.InputGuardrails;
 import dev.langchain4j.service.guardrail.OutputGuardrails;
 
 /**
- * Browser-based development UI for Helidon-managed LangChain4j agents.
+ * Browser-based web UI for Helidon-managed LangChain4j agents.
  */
 public final class LangChain4jDevUi implements HttpService, RuntimeType.Api<LangChain4jDevUiConfig> {
     /**

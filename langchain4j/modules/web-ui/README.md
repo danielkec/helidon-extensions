@@ -1,6 +1,6 @@
 # Helidon LangChain4j Web UI
 
-Browser-based development UI for Helidon-managed LangChain4j agents.
+Browser-based web UI for Helidon-managed LangChain4j agents.
 
 The module provides:
 

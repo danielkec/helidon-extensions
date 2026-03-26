@@ -23,9 +23,7 @@ import java.net.http.HttpResponse;
 import java.net.http.WebSocket;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -34,11 +32,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
-import java.util.stream.Stream;
 
-import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.ChessCommentaryAgent;
-import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.ChessOpponentAgent;
-import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.AiMoveProposal;
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.ChessEvent;
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.ChessSnapshot;
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.MoveEntryView;
@@ -68,13 +62,9 @@ class ChessExampleServerTest {
     private final HttpClient client;
     private final URI baseUri;
     private final MockChatModel chatModel;
-    private final ChessCommentaryAgent commentaryAgent;
-    private final ChessOpponentAgent opponentAgent;
     private final MockStreamingChatModel streamingModel;
 
     ChessExampleServerTest(WebServer server,
-                           ChessCommentaryAgent commentaryAgent,
-                           ChessOpponentAgent opponentAgent,
                            @Service.Named("agentic-chess-mock-chat-model") MockChatModel chatModel,
                            @Service.Named("agentic-chess-mock-streaming-model") MockStreamingChatModel streamingModel) {
         this.client = HttpClient.newBuilder()
@@ -82,15 +72,13 @@ class ChessExampleServerTest {
                 .build();
         this.baseUri = URI.create("http://localhost:" + server.port());
         this.chatModel = chatModel;
-        this.commentaryAgent = commentaryAgent;
-        this.opponentAgent = opponentAgent;
         this.streamingModel = streamingModel;
         configureOpponent(chatModel);
         configureCommentary(streamingModel);
     }
 
     @Test
-    void servesChessUiAndDevUi() throws Exception {
+    void servesChessUiAssets() throws Exception {
         HttpResponse<String> chessUiRedirect = client.send(HttpRequest.newBuilder(baseUri.resolve("/chess"))
                                                                    .GET()
                                                                    .build(),
@@ -107,10 +95,6 @@ class ChessExampleServerTest {
                                                            .GET()
                                                            .build(),
                                                    HttpResponse.BodyHandlers.ofString());
-        HttpResponse<String> devUi = client.send(HttpRequest.newBuilder(baseUri.resolve("/langchain4j/ui/"))
-                                                         .GET()
-                                                         .build(),
-                                                 HttpResponse.BodyHandlers.ofString());
 
         assertThat(chessUiRedirect.statusCode(), is(Status.MOVED_PERMANENTLY_301.code()));
         assertThat(chessUiRedirect.headers().firstValue("location").orElse(""), is("/chess/"));
@@ -139,8 +123,6 @@ class ChessExampleServerTest {
         assertThat(chessJs.body(), containsString("appendHighlightedMoveText"));
         assertThat(chessJs.body(), containsString("candidateHistory.unshift"));
         assertThat(chessJs.body(), containsString("elements.sidebar.style.height = `${boardCardHeight}px`;"));
-        assertThat(devUi.statusCode(), is(Status.OK_200.code()));
-        assertThat(devUi.body(), containsString("Helidon LangChain4j Dev UI"));
     }
 
     @Test
@@ -250,87 +232,6 @@ class ChessExampleServerTest {
 
         assertThat(afterAiTurn.moveHistory().stream().map(MoveEntryView::move).toList(),
                    is(List.of("e2e4", "e7e5")));
-    }
-
-    @Test
-    void tracksChessAgentEventsInDevUiGlobalTracking() throws Exception {
-        Map<String, Object> enabled = setTracking(true);
-        assertThat(enabled.get("trackAllEvents"), is(true));
-
-        try {
-            ChessSnapshot created = postJson("/chess/api/game", "", ChessSnapshot.class);
-            assertThat(created.awaitingHumanMove(), is(true));
-
-            Map<String, Object> humanWaiting = waitForTracking(snapshot ->
-                    hasTrackedEvent(snapshot, "before-agent", "chess-human-move-workflow"));
-            assertThat(humanWaiting.get("trackAllEvents"), is(true));
-
-            MoveSubmissionResult submission = postJson("/chess/api/game/" + created.sessionId() + "/move",
-                                                       "{\"move\":\"e2e4\"}",
-                                                       MoveSubmissionResult.class);
-            assertThat(submission.accepted(), is(true));
-
-            Map<String, Object> completed = waitForTracking(snapshot ->
-                    hasTrackedEvent(snapshot, "after-agent", "chess-opponent")
-                            && hasTrackedEvent(snapshot, "after-agent", "chess-commentary-service"));
-
-            @SuppressWarnings("unchecked")
-            Map<String, Object> inspection = (Map<String, Object>) completed.get("inspection");
-            assertThat(inspection, is(not((Object) null)));
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> events = (List<Map<String, Object>>) inspection.get("events");
-            assertThat(events.stream().map(event -> event.get("agent")).toList(), hasItem("chess-opponent"));
-            assertThat(events.stream().map(event -> event.get("agent")).toList(), hasItem("chess-commentary-service"));
-        } finally {
-            Map<String, Object> disabled = setTracking(false);
-            assertThat(disabled.get("trackAllEvents"), is(false));
-        }
-    }
-
-    @Test
-    void tracksDirectChessAgentAndServiceEventsInDevUiGlobalTracking() throws Exception {
-        Map<String, Object> enabled = setTracking(true);
-        assertThat(enabled.get("trackAllEvents"), is(true));
-
-        try {
-            AiMoveProposal decision = opponentAgent.chooseMove("tracking-direct-agent",
-                                                               "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
-                                                               "Black",
-                                                               "1. e2e4",
-                                                               "e7e5, c7c5, e7e6",
-                                                               3,
-                                                               3);
-            assertThat(decision.getMove(), is("e7e5"));
-
-            Map<String, Object> afterOpponent = waitForTracking(snapshot ->
-                    hasTrackedEvent(snapshot, "after-agent", "chess-opponent"));
-            @SuppressWarnings("unchecked")
-            Map<String, Object> opponentInspection = (Map<String, Object>) afterOpponent.get("inspection");
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> opponentEvents = (List<Map<String, Object>>) opponentInspection.get("events");
-            assertThat(opponentEvents.stream().map(event -> event.get("agent")).toList(), hasItem("chess-opponent"));
-
-            try (Stream<String> commentary = commentaryAgent.comment("tracking-direct-agent",
-                                                                     "After White's move",
-                                                                     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
-                                                                     "ACTIVE",
-                                                                     "e2e4",
-                                                                     "1. e2e4")) {
-                commentary.toList();
-            }
-
-            Map<String, Object> afterCommentary = waitForTracking(snapshot ->
-                    hasTrackedEvent(snapshot, "after-agent", "chess-commentary-service"));
-            @SuppressWarnings("unchecked")
-            Map<String, Object> commentaryInspection = (Map<String, Object>) afterCommentary.get("inspection");
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> commentaryEvents = (List<Map<String, Object>>) commentaryInspection.get("events");
-            assertThat(commentaryEvents.stream().map(event -> event.get("agent")).toList(),
-                       hasItem("chess-commentary-service"));
-        } finally {
-            Map<String, Object> disabled = setTracking(false);
-            assertThat(disabled.get("trackAllEvents"), is(false));
-        }
     }
 
     private void configureOpponent(MockChatModel chatModel) {
@@ -454,59 +355,6 @@ class ChessExampleServerTest {
             throw new IllegalStateException("Unexpected status " + response.statusCode() + ": " + response.body());
         }
         return JSONB.fromJson(response.body(), type);
-    }
-
-    private Map<String, Object> setTracking(boolean enabled) throws Exception {
-        HttpResponse<String> response = client.send(HttpRequest.newBuilder(baseUri.resolve("/langchain4j/ui/api/tracking"))
-                                                            .POST(HttpRequest.BodyPublishers.ofString(
-                                                                    JSONB.toJson(Map.of("trackAllEvents", enabled))))
-                                                            .header("Accept", "application/json")
-                                                            .header("Content-Type", "application/json")
-                                                            .build(),
-                                                    HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != Status.OK_200.code()) {
-            throw new IllegalStateException("Unexpected tracking status " + response.statusCode() + ": " + response.body());
-        }
-        @SuppressWarnings("unchecked")
-        Map<String, Object> snapshot = JSONB.fromJson(response.body(), LinkedHashMap.class);
-        return snapshot;
-    }
-
-    private Map<String, Object> waitForTracking(Predicate<Map<String, Object>> condition) throws Exception {
-        Map<String, Object> latest = null;
-        for (int attempt = 0; attempt < 120; attempt++) {
-            HttpResponse<String> response = client.send(HttpRequest.newBuilder(baseUri.resolve("/langchain4j/ui/api/tracking"))
-                                                                .GET()
-                                                                .header("Accept", "application/json")
-                                                                .build(),
-                                                        HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != Status.OK_200.code()) {
-                throw new IllegalStateException("Unexpected tracking status " + response.statusCode() + ": " + response.body());
-            }
-            @SuppressWarnings("unchecked")
-            Map<String, Object> snapshot = JSONB.fromJson(response.body(), LinkedHashMap.class);
-            latest = snapshot;
-            if (condition.test(snapshot)) {
-                return snapshot;
-            }
-            Thread.sleep(50);
-        }
-        throw new AssertionError("Tracking did not reach expected state: " + latest);
-    }
-
-    private static boolean hasTrackedEvent(Map<String, Object> snapshot, String type, String agent) {
-        Object inspection = snapshot.get("inspection");
-        if (!(inspection instanceof Map<?, ?> inspectionMap)) {
-            return false;
-        }
-        Object events = inspectionMap.get("events");
-        if (!(events instanceof List<?> eventList)) {
-            return false;
-        }
-        return eventList.stream()
-                .filter(Map.class::isInstance)
-                .map(Map.class::cast)
-                .anyMatch(event -> type.equals(event.get("type")) && agent.equals(event.get("agent")));
     }
 
     private static final class EventCollector implements WebSocket.Listener {

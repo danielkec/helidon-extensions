@@ -1,8 +1,8 @@
-# Helidon LangChain4j Dev UI Design
+# Helidon LangChain4j Web UI Design
 
 ## Goal
 
-Add a browser-based development UI for Helidon LangChain4j agents that supports:
+Add a browser-based web UI for Helidon LangChain4j agents that supports:
 
 - agent discovery
 - interactive invocation and chat-style testing

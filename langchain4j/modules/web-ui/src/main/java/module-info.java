@@ -18,9 +18,9 @@ import io.helidon.common.features.api.HelidonFlavor;
 import io.helidon.common.features.api.Preview;
 
 /**
- * Browser-based development UI for Helidon LangChain4j agents.
+ * Browser-based web UI for Helidon LangChain4j agents.
  */
-@Features.Name("LangChain4j Dev UI")
+@Features.Name("LangChain4j Web UI")
 @Features.Description("Browser UI for interactive LangChain4j agent development and debugging")
 @Features.Flavor(HelidonFlavor.SE)
 @Features.Preview

@@ -65,7 +65,7 @@ class LangChain4jDevUiTest {
                 .request(String.class);
 
         assertThat(response.status(), is(Status.OK_200));
-        assertThat(response.entity(), containsString("Helidon LangChain4j Dev UI"));
+        assertThat(response.entity(), containsString("Helidon LangChain4j Web UI"));
         assertThat(response.entity(), containsString("app.js"));
         assertThat(response.entity(), containsString("chat-history"));
     }
