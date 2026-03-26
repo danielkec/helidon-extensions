@@ -236,6 +236,8 @@ Helidon SE declarative example application.
   - produces commentary for the accepted move and current position
 - `ChessHumanMoveWorkflowAgent`
   - models the human-in-the-loop move collection stage as a named agent workflow
+- `ChessHumanMoveCollectorAgent`
+  - provides the dedicated human-in-the-loop collection step used by the workflow agent
 - `IllegalMoveOutputGuardrail`
   - validates the AI proposal against the legal moves from `ChessRulesService`
   - reprompts on malformed or illegal output while normalizing the structured result
