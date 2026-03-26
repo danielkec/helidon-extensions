@@ -29,6 +29,8 @@ langchain4j:
       chat-model: agentic-chess-chat-model
       output-guardrails:
         - io.helidon.extensions.langchain4j.examples.agentic.chess.ai.IllegalMoveOutputGuardrail
+      output-guardrails-config:
+        max-retries: 6
 
   services:
     chess-commentary-service:

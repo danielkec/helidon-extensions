@@ -118,6 +118,12 @@ class AgentsConfigSupport {
             agentBuilder.inputGuardrailClasses(classes);
         }
 
+        agentsConfig.outputGuardrailsConfig()
+                .map(config -> dev.langchain4j.guardrail.config.OutputGuardrailsConfig.builder()
+                        .maxRetries(config.maxRetries())
+                        .build())
+                .ifPresent(agentBuilder::outputGuardrailsConfig);
+
         if (!agentsConfig.outputGuardrails().isEmpty()) {
             @SuppressWarnings("unchecked")
             Class<? extends OutputGuardrail>[] classes =

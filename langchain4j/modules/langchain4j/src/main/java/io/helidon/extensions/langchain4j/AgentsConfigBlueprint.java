@@ -35,6 +35,7 @@ import dev.langchain4j.guardrail.OutputGuardrail;
  *     <li>Execution settings (async invocation and concurrent tool execution)</li>
  *     <li>References to services resolved from the {@link ServiceRegistry} (model, memory, retriever, tools, etc.)</li>
  *     <li>Guardrail class lists resolved from the {@link ServiceRegistry}</li>
+ *     <li>Output guardrail execution settings such as retry/reprompt attempts</li>
  * </ul>
  */
 @Prototype.Blueprint
@@ -200,4 +201,12 @@ interface AgentsConfigBlueprint {
     @Option.Configured
     @Option.Singular
     Set<Class<? extends OutputGuardrail>> outputGuardrails();
+
+    /**
+     * Output guardrail execution settings to apply to the agent.
+     *
+     * @return configured output guardrail settings, or empty if not configured
+     */
+    @Option.Configured
+    Optional<OutputGuardrailConfig> outputGuardrailsConfig();
 }

@@ -40,6 +40,7 @@ module io.helidon.extensions.langchain4j.webui {
     requires langchain4j;
     requires langchain4j.agentic;
     requires org.eclipse.yasson;
+    requires langchain4j.core;
 
     provides io.helidon.webserver.spi.ServerFeatureProvider
             with io.helidon.extensions.langchain4j.webui.LangChain4jDevUiFeatureProvider;

@@ -182,6 +182,7 @@ Helidon SE declarative example application.
   - live provider setup using the OCI-hosted OpenAI-compatible endpoint
   - mock-model setup for local validation
 - Runtime logging should use the standard Helidon JUL `logging.properties` pattern, with SLF4J routed into JUL for library logs.
+- Agent output-guardrail retry/reprompt attempts should be configurable through Helidon config using `output-guardrails-config.max-retries`.
 - Exact model naming, profile wiring, and configuration layout are still open.
 
 ## Dependencies and Integrations
@@ -341,3 +342,4 @@ No blocking open questions for v1 at this stage.
 - 2026-03-25: WebSocket event broadcasting must remove dead sessions on send failure so browser disconnects cannot crash the chess game loop.
 - 2026-03-25: The example uses standard Helidon JUL logging configuration via `logging.properties`, with SLF4J logs bridged into JUL.
 - 2026-03-25: After a human move, White commentary now streams in parallel with Black move selection; the snapshot contract exposes separate `aiThinking`, `commentaryStreaming`, and `commentaryPhase` state so the UI can represent overlapping progress while keeping Black's move application aligned with the finished White commentary.
+- 2026-03-26: Helidon declarative agent config now exposes `output-guardrails-config.max-retries`, and the example currently sets the chess opponent guardrail retry budget to `6` there instead of relying only on LangChain4j defaults.

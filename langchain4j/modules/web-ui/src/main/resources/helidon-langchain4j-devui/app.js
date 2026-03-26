@@ -1557,7 +1557,7 @@ function renderTimeline(items, kind) {
         return `<div class="empty-state">No ${kind}s captured yet.</div>`;
     }
 
-    return items.map((item) => kind === "event"
+    return [...items].reverse().map((item) => kind === "event"
         ? renderEventTimelineCard(item)
         : renderInvocationTimelineCard(item)
     ).join("");

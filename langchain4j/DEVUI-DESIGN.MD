@@ -243,6 +243,7 @@ UI capabilities:
 - support consistent keyboard invocation shortcuts across agents and forms, with explicit multiline-editor shortcuts where needed
 - show an in-flight progress bubble and a visually active run/send button while the UI is waiting for an agent response
 - refresh the inspector dynamically while a workflow is running so events and trace details appear progressively in the browser
+- render event and trace timelines in reverse chronological order so the newest activity stays visible first
 - expose a topbar toggle for app-wide event tracking and, when enabled, drive the inspector and progress strip from the rolling global event stream instead of only the latest browser-started invocation
 - when app-wide tracking is enabled, move the inspector focus to the event log automatically and reflect tracking state in the summary/raw-result area so external activity is immediately visible instead of looking like an idle browser conversation
 - app-wide tracking mode hides the conversation workspace pane entirely and lets the inspector expand into that area; disabling tracking restores the previous browser conversation workspace without clearing its local state
