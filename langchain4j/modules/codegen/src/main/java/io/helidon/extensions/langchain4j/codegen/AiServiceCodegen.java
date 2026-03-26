@@ -52,6 +52,11 @@ import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.AI_TOOLS;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.AI_TOOL_PROVIDER;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.CONFIG;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_AI_SERVICES;
+import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_AI_SERVICE_COMPLETED_LISTENER;
+import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_AI_SERVICE_ERROR_LISTENER;
+import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_AI_SERVICE_REQUEST_ISSUED_LISTENER;
+import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_AI_SERVICE_RESPONSE_RECEIVED_LISTENER;
+import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_AI_SERVICE_STARTED_LISTENER;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_CHAT_MEMORY;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_CHAT_MEMORY_PROVIDER;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_CHAT_MEMORY_STORE;
@@ -61,9 +66,12 @@ import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_CONTEN
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_MCP_CLIENT;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_MCP_TOOL_PROVIDER;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_MODERATION_MODEL;
+import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_INPUT_GUARDRAIL_EXECUTED_LISTENER;
+import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_OUTPUT_GUARDRAIL_EXECUTED_LISTENER;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_RETRIEVAL_AUGMENTOR;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_STREAMING_CHAT_MODEL;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_TOOL_PROVIDER;
+import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.LC_TOOL_EXECUTED_EVENT_LISTENER;
 import static io.helidon.service.codegen.ServiceCodegenTypes.SERVICE_ANNOTATION_NAMED;
 import static io.helidon.service.codegen.ServiceCodegenTypes.SERVICE_ANNOTATION_SINGLETON;
 import static io.helidon.service.codegen.ServiceCodegenTypes.SERVICE_REGISTRY;
@@ -322,6 +330,31 @@ class AiServiceCodegen implements CodegenExtension {
                     aiServicesToolParameters(it,
                                              aiInterface);
                 })
+                .addContentLine("")
+                .addContent("builder.registerListeners(registry.all(")
+                .addContent(LC_AI_SERVICE_STARTED_LISTENER)
+                .addContentLine(".class));")
+                .addContent("builder.registerListeners(registry.all(")
+                .addContent(LC_AI_SERVICE_COMPLETED_LISTENER)
+                .addContentLine(".class));")
+                .addContent("builder.registerListeners(registry.all(")
+                .addContent(LC_AI_SERVICE_ERROR_LISTENER)
+                .addContentLine(".class));")
+                .addContent("builder.registerListeners(registry.all(")
+                .addContent(LC_AI_SERVICE_REQUEST_ISSUED_LISTENER)
+                .addContentLine(".class));")
+                .addContent("builder.registerListeners(registry.all(")
+                .addContent(LC_AI_SERVICE_RESPONSE_RECEIVED_LISTENER)
+                .addContentLine(".class));")
+                .addContent("builder.registerListeners(registry.all(")
+                .addContent(LC_TOOL_EXECUTED_EVENT_LISTENER)
+                .addContentLine(".class));")
+                .addContent("builder.registerListeners(registry.all(")
+                .addContent(LC_INPUT_GUARDRAIL_EXECUTED_LISTENER)
+                .addContentLine(".class));")
+                .addContent("builder.registerListeners(registry.all(")
+                .addContent(LC_OUTPUT_GUARDRAIL_EXECUTED_LISTENER)
+                .addContentLine(".class));")
                 .addContentLine("")
                 .addContentLine("this.aiServices = builder;")
         );

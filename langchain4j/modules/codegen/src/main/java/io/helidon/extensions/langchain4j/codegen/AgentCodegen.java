@@ -41,6 +41,7 @@ import static io.helidon.common.types.TypeNames.CLASS_WILDCARD;
 import static io.helidon.common.types.TypeNames.STRING;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.AGENTS_CONFIG;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.AGENT_METADATA;
+import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.AGENT_SERVICE_CUSTOMIZERS;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.AI_AGENT;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.AI_CHAT_MODEL;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.CONFIG;
@@ -148,7 +149,7 @@ class AgentCodegen implements CodegenExtension {
                 .addContent(".map(n -> registry.getNamed(ChatModel.class, n))")
                 .addContentLine(".orElse(chatModel);")
                 .decreaseContentPadding()
-                .addContent("return ")
+                .addContent("var agent = ")
                 .addContent(LC_AGENTIC_SERVICES)
                 .addContent(".createAgenticSystem(")
                 .addContent(agentInterfaceType)
@@ -156,6 +157,11 @@ class AgentCodegen implements CodegenExtension {
                 .addContent("configuredModel, ")
                 .addContent("this")
                 .addContentLine("::configureSubAgents);")
+                .addContent("return ")
+                .addContent(AGENT_SERVICE_CUSTOMIZERS)
+                .addContent(".customize(")
+                .addContent(agentInterfaceType)
+                .addContent(".class, agent, registry);")
                 .addContentLine("")
         );
 

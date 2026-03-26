@@ -46,6 +46,8 @@ final class LangchainTypes {
             TypeName.create("io.helidon.extensions.langchain4j.AiProvider.CustomBuilderMapping");
     static final TypeName AGENTS_CONFIG = TypeName.create("io.helidon.extensions.langchain4j.AgentsConfig");
     static final TypeName AGENT_METADATA = TypeName.create("io.helidon.extensions.langchain4j.AgentMetadata");
+    static final TypeName AGENT_SERVICE_CUSTOMIZERS =
+            TypeName.create("io.helidon.extensions.langchain4j.AgentServiceCustomizers");
 
 
     static final TypeName LC_AI_SERVICES = TypeName.create("dev.langchain4j.service.AiServices");
@@ -73,6 +75,22 @@ final class LangchainTypes {
     static final TypeName LC_AGENTIC_SERVICES = TypeName.create("dev.langchain4j.agentic.AgenticServices");
     static final TypeName LC_DECLARATIVE_AGENT_CREATION_CONTEXT = TypeName.create(
             "dev.langchain4j.agentic.AgenticServices.DeclarativeAgentCreationContext");
+    static final TypeName LC_AI_SERVICE_STARTED_LISTENER =
+            TypeName.create("dev.langchain4j.observability.api.listener.AiServiceStartedListener");
+    static final TypeName LC_AI_SERVICE_COMPLETED_LISTENER =
+            TypeName.create("dev.langchain4j.observability.api.listener.AiServiceCompletedListener");
+    static final TypeName LC_AI_SERVICE_ERROR_LISTENER =
+            TypeName.create("dev.langchain4j.observability.api.listener.AiServiceErrorListener");
+    static final TypeName LC_AI_SERVICE_REQUEST_ISSUED_LISTENER =
+            TypeName.create("dev.langchain4j.observability.api.listener.AiServiceRequestIssuedListener");
+    static final TypeName LC_AI_SERVICE_RESPONSE_RECEIVED_LISTENER =
+            TypeName.create("dev.langchain4j.observability.api.listener.AiServiceResponseReceivedListener");
+    static final TypeName LC_TOOL_EXECUTED_EVENT_LISTENER =
+            TypeName.create("dev.langchain4j.observability.api.listener.ToolExecutedEventListener");
+    static final TypeName LC_INPUT_GUARDRAIL_EXECUTED_LISTENER =
+            TypeName.create("dev.langchain4j.observability.api.listener.InputGuardrailExecutedListener");
+    static final TypeName LC_OUTPUT_GUARDRAIL_EXECUTED_LISTENER =
+            TypeName.create("dev.langchain4j.observability.api.listener.OutputGuardrailExecutedListener");
 
     static final TypeName SVC_SERVICES_FACTORY = TypeName.create("io.helidon.service.registry.Service.ServicesFactory");
     static final TypeName CONFIG = TypeName.create("io.helidon.config.Config");
