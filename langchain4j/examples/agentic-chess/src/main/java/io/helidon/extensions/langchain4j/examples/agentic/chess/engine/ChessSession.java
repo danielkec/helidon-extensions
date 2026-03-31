@@ -16,6 +16,7 @@
 
 package io.helidon.extensions.langchain4j.examples.agentic.chess.engine;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -37,6 +38,7 @@ final class ChessSession {
     private GameStatus status;
     private WaitingFor waitingFor;
     private boolean aiThinking;
+    private volatile Instant lastTouched;
     private long revision;
     private String lastMove;
     private boolean commentaryStreaming;
@@ -59,6 +61,7 @@ final class ChessSession {
         this.status = GameStatus.ACTIVE;
         this.waitingFor = WaitingFor.NONE;
         this.aiThinking = false;
+        this.lastTouched = Instant.now();
         this.revision = 1;
         this.lastMove = "";
         this.commentaryStreaming = false;
@@ -120,7 +123,12 @@ final class ChessSession {
         return revision;
     }
 
+    Instant lastTouched() {
+        return lastTouched;
+    }
+
     void touch() {
+        this.lastTouched = Instant.now();
         this.revision++;
     }
 

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+declarative:
+  ignore-incubating: true
 
 server:
   port: 8090
@@ -48,10 +50,10 @@ langchain4j:
       timeout: PT90S
       max-retries: 5
 
-langchain4j-dev-ui:
-  enabled: true
-
 agentic-chess:
   candidate-lines:
     count: 3
     plies: 3
+  sessions:
+    idle-timeout: PT30M
+    cleanup-interval: PT1M

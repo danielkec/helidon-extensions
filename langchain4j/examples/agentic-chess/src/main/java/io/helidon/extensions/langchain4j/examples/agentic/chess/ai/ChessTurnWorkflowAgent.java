@@ -31,7 +31,7 @@ import io.helidon.extensions.langchain4j.examples.agentic.chess.engine.ChessPosi
 @Ai.Agent("chess-turn-workflow")
 public interface ChessTurnWorkflowAgent {
     @SequenceAgent(outputKey = ChessTurnWorkflowState.TURN_RESULT_KEY, subAgents = {
-            ChessHumanMoveCollectorAgent.class,
+            ChessHumanAgent.class,
             ChessTurnOutcomeRouterAgent.class
     })
     ChessTurnWorkflowResult playTurn(@MemoryId String sessionId,

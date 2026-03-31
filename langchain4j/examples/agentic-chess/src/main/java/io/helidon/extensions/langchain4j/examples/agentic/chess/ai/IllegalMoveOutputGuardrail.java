@@ -21,6 +21,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.AiCandidateLine;
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.AiMoveProposal;
@@ -28,6 +29,8 @@ import io.helidon.extensions.langchain4j.examples.agentic.chess.engine.ChessMove
 import io.helidon.extensions.langchain4j.examples.agentic.chess.engine.ChessPosition;
 import io.helidon.extensions.langchain4j.examples.agentic.chess.engine.ChessRulesService;
 import io.helidon.service.registry.Service;
+import jakarta.json.bind.Jsonb;
+import jakarta.json.bind.JsonbBuilder;
 
 import dev.langchain4j.guardrail.OutputGuardrail;
 import dev.langchain4j.guardrail.OutputGuardrailRequest;
@@ -35,6 +38,8 @@ import dev.langchain4j.guardrail.OutputGuardrailResult;
 
 @Service.Singleton
 public final class IllegalMoveOutputGuardrail implements OutputGuardrail {
+    private static final Jsonb JSONB = JsonbBuilder.create();
+
     private final ChessRulesService rules;
 
     public IllegalMoveOutputGuardrail(ChessRulesService rules) {
@@ -49,7 +54,7 @@ public final class IllegalMoveOutputGuardrail implements OutputGuardrail {
             int maxLines = numberValue(variables.get("candidateLineCount"), 3);
             int maxPlies = numberValue(variables.get("candidateLinePly"), 3);
 
-            AiMoveProposal normalized = normalize(ChessAiJsonSupport.parseProposal(request.responseFromLLM().aiMessage().text()),
+            AiMoveProposal normalized = normalize(parseProposal(request.responseFromLLM().aiMessage().text()),
                                                   maxLines,
                                                   maxPlies);
 
@@ -83,7 +88,7 @@ public final class IllegalMoveOutputGuardrail implements OutputGuardrail {
                 }
             }
 
-            return successWith(ChessAiJsonSupport.toJson(normalized), normalized);
+            return successWith(JSONB.toJson(normalized), normalized);
         } catch (Exception e) {
             return reprompt("Model response was malformed", e,
                             """
@@ -115,6 +120,17 @@ public final class IllegalMoveOutputGuardrail implements OutputGuardrail {
             return Integer.parseInt(text);
         }
         return fallback;
+    }
+
+    private AiMoveProposal parseProposal(String rawText) {
+        Objects.requireNonNull(rawText);
+        // Guardrails receive raw model text, not a guaranteed JSON-only payload.
+        String cleaned = cleanJson(rawText);
+        AiMoveProposal proposal = JSONB.fromJson(cleaned, AiMoveProposal.class);
+        if (proposal == null) {
+            throw new IllegalArgumentException("Model response did not contain JSON");
+        }
+        return proposal;
     }
 
     private AiMoveProposal normalize(AiMoveProposal original, int maxLines, int maxPlies) {
@@ -171,5 +187,24 @@ public final class IllegalMoveOutputGuardrail implements OutputGuardrail {
 
     private String trimmed(String text) {
         return text == null ? "" : text.trim();
+    }
+
+    private String cleanJson(String rawText) {
+        String trimmed = rawText.trim();
+        // Models sometimes wrap the JSON in markdown fences or extra prose.
+        if (trimmed.startsWith("```")) {
+            int firstNewline = trimmed.indexOf('\n');
+            int closingFence = trimmed.lastIndexOf("```");
+            if (firstNewline >= 0 && closingFence > firstNewline) {
+                trimmed = trimmed.substring(firstNewline + 1, closingFence).trim();
+            }
+        }
+
+        int firstBrace = trimmed.indexOf('{');
+        int lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace >= firstBrace) {
+            return trimmed.substring(firstBrace, lastBrace + 1);
+        }
+        throw new IllegalArgumentException("Expected JSON object in model response");
     }
 }

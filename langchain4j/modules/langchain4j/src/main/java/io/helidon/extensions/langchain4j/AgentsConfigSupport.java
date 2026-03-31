@@ -131,7 +131,7 @@ class AgentsConfigSupport {
             agentBuilder.outputGuardrailClasses(classes);
         }
 
-        serviceRegistry.all(AgentBuilderCustomizer.class)
-                .forEach(customizer -> customizer.customize(ctx, serviceRegistry));
+//        serviceRegistry.all(AgentBuilderCustomizer.class)
+//                .forEach(customizer -> customizer.customize(ctx, serviceRegistry));
     }
 }

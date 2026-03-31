@@ -23,9 +23,9 @@ import dev.langchain4j.model.output.structured.Description;
 
 public final class AiMoveProposal {
     @Description("Chosen legal move in UCI coordinate notation, for example e7e5")
-    private String move;
+    private String move = "";
     @Description("One short sentence summarizing why the move was chosen")
-    private String summary;
+    private String summary = "";
     @Description("Top candidate continuation lines from the current position; the first line must start with the chosen move")
     private List<AiCandidateLine> candidateLines = new ArrayList<>();
 
@@ -37,7 +37,7 @@ public final class AiMoveProposal {
     }
 
     public void setMove(String move) {
-        this.move = move;
+        this.move = move == null ? "" : move;
     }
 
     public String getSummary() {
@@ -45,7 +45,7 @@ public final class AiMoveProposal {
     }
 
     public void setSummary(String summary) {
-        this.summary = summary;
+        this.summary = summary == null ? "" : summary;
     }
 
     public List<AiCandidateLine> getCandidateLines() {
@@ -53,6 +53,6 @@ public final class AiMoveProposal {
     }
 
     public void setCandidateLines(List<AiCandidateLine> candidateLines) {
-        this.candidateLines = candidateLines;
+        this.candidateLines = candidateLines == null ? new ArrayList<>() : new ArrayList<>(candidateLines);
     }
 }

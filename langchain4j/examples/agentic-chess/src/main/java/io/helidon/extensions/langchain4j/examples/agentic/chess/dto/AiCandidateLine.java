@@ -23,7 +23,7 @@ import dev.langchain4j.model.output.structured.Description;
 
 public final class AiCandidateLine {
     @Description("Short explanation of the candidate line")
-    private String summary;
+    private String summary = "";
     @Description("Continuation moves in UCI coordinate notation from the current position")
     private List<String> moves = new ArrayList<>();
 
@@ -35,7 +35,7 @@ public final class AiCandidateLine {
     }
 
     public void setSummary(String summary) {
-        this.summary = summary;
+        this.summary = summary == null ? "" : summary;
     }
 
     public List<String> getMoves() {
@@ -43,6 +43,6 @@ public final class AiCandidateLine {
     }
 
     public void setMoves(List<String> moves) {
-        this.moves = moves;
+        this.moves = moves == null ? new ArrayList<>() : new ArrayList<>(moves);
     }
 }
