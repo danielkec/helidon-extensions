@@ -25,7 +25,7 @@ import java.util.concurrent.ExecutionException;
 import io.helidon.service.registry.Service;
 
 @Service.Singleton
-public final class ChessHitlBridge {
+public final class HumanMoveSemaphore {
     private final ConcurrentMap<String, CompletableFuture<String>> pendingMoves = new ConcurrentHashMap<>();
 
     public String awaitMove(String sessionId) {

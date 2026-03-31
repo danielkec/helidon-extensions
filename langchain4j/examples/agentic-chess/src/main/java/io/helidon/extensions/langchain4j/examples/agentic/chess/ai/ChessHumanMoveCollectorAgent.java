@@ -16,17 +16,35 @@
 
 package io.helidon.extensions.langchain4j.examples.agentic.chess.ai;
 
+import dev.langchain4j.agentic.Agent;
 import dev.langchain4j.agentic.declarative.HumanInTheLoop;
 import dev.langchain4j.service.MemoryId;
+import dev.langchain4j.service.UserMessage;
 import dev.langchain4j.service.V;
+import io.helidon.extensions.langchain4j.Ai;
 
+@Ai.Agent("chess-human-move-collector")
+@Ai.ChatModel("agentic-chess-chat-model")
 public interface ChessHumanMoveCollectorAgent {
+    @UserMessage("""
+            Human move collection context:
+            {{humanContext}}
+
+            Legal moves:
+            {{legalMoves}}
+
+            State that the workflow is waiting for the human player to submit a legal UCI move.
+            """)
+    @Agent("Describe the pending human move collection step")
+    String describePendingMove(@V("humanContext") String humanContext,
+                               @V("legalMoves") String legalMoves);
+
     @HumanInTheLoop(description = "Collect the human player's chess move from the /chess browser UI",
-                    outputKey = "humanMove")
+                    outputKey = ChessTurnWorkflowState.HUMAN_MOVE_KEY)
     static String await(@MemoryId String sessionId,
-                        @V("hitlBridge") ChessHitlBridge hitlBridge,
+                        @V("humanMoveSemaphore") HumanMoveSemaphore humanMoveSemaphore,
                         @V("humanContext") String humanContext,
                         @V("legalMoves") String legalMoves) {
-        return hitlBridge.awaitMove(sessionId);
+        return humanMoveSemaphore.awaitMove(sessionId);
     }
 }

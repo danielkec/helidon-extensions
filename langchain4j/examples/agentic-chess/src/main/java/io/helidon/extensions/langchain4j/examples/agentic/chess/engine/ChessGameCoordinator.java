@@ -20,14 +20,15 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.Lock;
 import java.util.stream.Stream;
 
-import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.ChessCommentaryAgent;
-import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.ChessHitlBridge;
-import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.ChessHumanMoveWorkflowAgent;
-import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.ChessOpponentAgent;
+import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.ChessCommentaryService;
+import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.ChessTurnWorkflowAgent;
+import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.ChessTurnWorkflowResult;
+import io.helidon.extensions.langchain4j.examples.agentic.chess.ai.HumanMoveSemaphore;
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.AiCandidateLine;
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.AiMoveProposal;
 import io.helidon.extensions.langchain4j.examples.agentic.chess.dto.ChessEvent;
@@ -40,28 +41,25 @@ import io.helidon.service.registry.Service;
 public final class ChessGameCoordinator {
     private static final System.Logger LOGGER = System.getLogger(ChessGameCoordinator.class.getName());
 
-    private final ChessCommentaryAgent commentaryAgent;
+    private final ChessCommentaryService commentaryAgent;
     private final ChessEventBroadcaster broadcaster;
-    private final ChessHitlBridge hitlBridge;
-    private final ChessHumanMoveWorkflowAgent humanMoveWorkflowAgent;
-    private final ChessOpponentAgent opponentAgent;
+    private final HumanMoveSemaphore humanMoveSemaphore;
+    private final ChessTurnWorkflowAgent turnWorkflowAgent;
     private final ChessPromptSupport promptSupport;
     private final ChessRulesService rules;
     private final ChessSessionStore sessions;
 
-    ChessGameCoordinator(ChessCommentaryAgent commentaryAgent,
+    ChessGameCoordinator(ChessCommentaryService commentaryAgent,
                          ChessEventBroadcaster broadcaster,
-                         ChessHitlBridge hitlBridge,
-                         ChessHumanMoveWorkflowAgent humanMoveWorkflowAgent,
-                         ChessOpponentAgent opponentAgent,
+                         HumanMoveSemaphore humanMoveSemaphore,
+                         ChessTurnWorkflowAgent turnWorkflowAgent,
                          ChessPromptSupport promptSupport,
                          ChessRulesService rules,
                          ChessSessionStore sessions) {
         this.commentaryAgent = commentaryAgent;
         this.broadcaster = broadcaster;
-        this.hitlBridge = hitlBridge;
-        this.humanMoveWorkflowAgent = humanMoveWorkflowAgent;
-        this.opponentAgent = opponentAgent;
+        this.humanMoveSemaphore = humanMoveSemaphore;
+        this.turnWorkflowAgent = turnWorkflowAgent;
         this.promptSupport = promptSupport;
         this.rules = rules;
         this.sessions = sessions;
@@ -87,7 +85,7 @@ public final class ChessGameCoordinator {
     }
 
     public ChessSnapshot resetGame(String sessionId) {
-        hitlBridge.cancel(sessionId);
+        humanMoveSemaphore.cancel(sessionId);
         ChessSession session = sessions.reset(sessionId);
         Lock writeLock = session.writeLock();
         writeLock.lock();
@@ -150,7 +148,7 @@ public final class ChessGameCoordinator {
             writeLock.unlock();
         }
 
-        boolean accepted = hitlBridge.submitMove(sessionId, normalizedMove);
+        boolean accepted = humanMoveSemaphore.submitMove(sessionId, normalizedMove);
         if (!accepted) {
             snapshot = sessions.require(sessionId).snapshot(rules);
             ChessEvent rejection = new ChessEvent("human-move-rejected",
@@ -179,28 +177,21 @@ public final class ChessGameCoordinator {
                     return;
                 }
 
-                HumanTurnContext humanTurn = prepareHumanTurn(session);
+                ChessHumanTurnContext humanTurn = prepareHumanTurn(session);
                 broadcaster.broadcast(sessionId, snapshotEvent("state-snapshot", humanTurn.snapshot()));
                 broadcaster.broadcast(sessionId, snapshotEvent("awaiting-move", humanTurn.snapshot()));
 
-                String humanMove = humanMoveWorkflowAgent.awaitMove(sessionId,
-                                                                    hitlBridge,
-                                                                    humanTurn.humanContext(),
-                                                                    humanTurn.legalMovesPrompt());
+                ChessTurnWorkflowResult turnResult = turnWorkflowAgent.playTurn(sessionId,
+                                                                                generation,
+                                                                                this,
+                                                                                humanMoveSemaphore,
+                                                                                humanTurn.humanContext(),
+                                                                                humanTurn.legalMovesPrompt(),
+                                                                                promptSupport.candidateLineCount(),
+                                                                                promptSupport.candidateLinePly());
 
-                session = currentSession(sessionId, generation);
-                if (session == null) {
-                    return;
-                }
-
-                if (!applyHumanMove(sessionId, session, generation, humanMove)) {
-                    continue;
-                }
-
-                CompletableFuture<Void> whiteCommentary = startCommentaryAsync(sessionId, generation, "After White's move");
-                AiTurnContext aiTurn = prepareAiTurn(sessionId, generation);
-                if (aiTurn == null) {
-                    whiteCommentary.join();
+                turnResult.whiteCommentaryFuture().join();
+                if (!turnResult.aiTurnActive()) {
                     if (finishIfTerminal(sessionId, generation)) {
                         return;
                     }
@@ -210,23 +201,12 @@ public final class ChessGameCoordinator {
                     continue;
                 }
 
-                broadcaster.broadcast(sessionId, snapshotEvent("ai-thinking", aiTurn.snapshot()));
-                CompletableFuture<AiMoveProposal> decisionFuture = startAsync(() -> opponentAgent.chooseMove(sessionId,
-                                                                                                             aiTurn.fen(),
-                                                                                                             aiTurn.sideToMove(),
-                                                                                                             aiTurn.moveHistory(),
-                                                                                                             aiTurn.legalMovesPrompt(),
-                                                                                                             promptSupport.candidateLineCount(),
-                                                                                                             promptSupport.candidateLinePly()));
-                AiMoveProposal decision = decisionFuture.join();
-                whiteCommentary.join();
-
                 session = currentSession(sessionId, generation);
                 if (session == null) {
                     return;
                 }
 
-                applyAiMove(sessionId, session, aiTurn.rootPosition(), decision);
+                applyAiMove(sessionId, session, turnResult.postHumanPosition(), turnResult.opponentDecision());
 
                 startCommentaryAsync(sessionId, generation, "After Black's move").join();
                 if (finishIfTerminal(sessionId, generation)) {
@@ -268,7 +248,7 @@ public final class ChessGameCoordinator {
         }
     }
 
-    private HumanTurnContext prepareHumanTurn(ChessSession session) {
+    private ChessHumanTurnContext prepareHumanTurn(ChessSession session) {
         Lock writeLock = session.writeLock();
         writeLock.lock();
         try {
@@ -281,21 +261,54 @@ public final class ChessGameCoordinator {
             session.touch();
             ChessSnapshot snapshot = session.snapshotLocked(rules);
             String humanContext = promptSupport.humanInputContext(session.position(), legalMoves, rules);
-            return new HumanTurnContext(humanContext,
-                                        rules.legalMovesSummary(session.position(), legalMoves),
-                                        snapshot);
+            return new ChessHumanTurnContext(humanContext,
+                                             rules.legalMovesSummary(session.position(), legalMoves),
+                                             snapshot);
         } finally {
             writeLock.unlock();
         }
     }
 
-    private boolean applyHumanMove(String sessionId, ChessSession session, String generation, String moveUci) {
+    public ChessTurnContinuation processHumanMoveForWorkflow(String sessionId, String generation, String humanMove) {
+        ChessSession session = currentSession(sessionId, generation);
+        if (session == null) {
+            throw new CancellationException("Session was replaced before the human move could be applied");
+        }
+
+        ChessHumanMoveApplication application = applyHumanMove(sessionId, session, generation, humanMove);
+        if (!application.applied()) {
+            throw new CancellationException("Session changed while applying the human move");
+        }
+
+        CompletableFuture<Void> whiteCommentary = startCommentaryAsync(sessionId, generation, "After White's move");
+        if (application.status() != GameStatus.ACTIVE) {
+            return new ChessTurnContinuation(application.position(), null, whiteCommentary);
+        }
+
+        ChessAiTurnContext aiTurn = prepareAiTurn(sessionId, generation);
+        if (aiTurn == null) {
+            if (currentSession(sessionId, generation) == null) {
+                throw new CancellationException("Session was replaced before the AI turn could start");
+            }
+            return new ChessTurnContinuation(application.position(), null, whiteCommentary);
+        }
+
+        broadcaster.broadcast(sessionId, snapshotEvent("ai-thinking", aiTurn.snapshot()));
+        return new ChessTurnContinuation(application.position(), aiTurn, whiteCommentary);
+    }
+
+    private ChessHumanMoveApplication applyHumanMove(String sessionId,
+                                                     ChessSession session,
+                                                     String generation,
+                                                     String moveUci) {
         ChessSnapshot snapshot;
+        ChessPosition nextPosition;
+        GameStatus nextStatus;
         Lock writeLock = session.writeLock();
         writeLock.lock();
         try {
             if (!session.generation().equals(generation) || session.waitingFor() != WaitingFor.HUMAN) {
-                return false;
+                return ChessHumanMoveApplication.notApplied();
             }
             Optional<ChessMove> move = rules.findLegalMove(session.position(), moveUci);
             if (move.isEmpty()) {
@@ -307,10 +320,10 @@ public final class ChessGameCoordinator {
                                                                 moveUci,
                                                                 null,
                                                                 snapshot));
-                return false;
+                return ChessHumanMoveApplication.notApplied();
             }
 
-            ChessPosition nextPosition = rules.applyMove(session.position(), move.get());
+            nextPosition = rules.applyMove(session.position(), move.get());
             session.position(nextPosition);
             session.moveHistory().add(new MoveRecord(session.moveHistory().size() + 1, Side.WHITE, move.get().uci()));
             session.lastMove(move.get().uci());
@@ -319,9 +332,10 @@ public final class ChessGameCoordinator {
             session.commentaryStreaming(false);
             session.commentaryPhase("");
             session.streamingCommentary("");
-            session.status(rules.gameStatus(nextPosition));
-            session.waitingFor(session.status() == GameStatus.ACTIVE ? WaitingFor.AI : WaitingFor.COMMENTARY);
-            session.terminalMessage(terminalMessage(nextPosition, session.status()));
+            nextStatus = rules.gameStatus(nextPosition);
+            session.status(nextStatus);
+            session.waitingFor(nextStatus == GameStatus.ACTIVE ? WaitingFor.AI : WaitingFor.COMMENTARY);
+            session.terminalMessage(terminalMessage(nextPosition, nextStatus));
             session.touch();
             snapshot = session.snapshotLocked(rules);
         } finally {
@@ -334,10 +348,10 @@ public final class ChessGameCoordinator {
                                                         moveUci,
                                                         null,
                                                         snapshot));
-        return true;
+        return ChessHumanMoveApplication.applied(nextPosition, nextStatus);
     }
 
-    private AiTurnContext prepareAiTurn(String sessionId, String generation) {
+    private ChessAiTurnContext prepareAiTurn(String sessionId, String generation) {
         ChessSession session = currentSession(sessionId, generation);
         if (session == null) {
             return null;
@@ -354,12 +368,11 @@ public final class ChessGameCoordinator {
             session.aiThinking(true);
             session.touch();
             ChessSnapshot snapshot = session.snapshotLocked(rules);
-            return new AiTurnContext(rootPosition,
-                                     rootPosition.toFen(),
-                                     rootPosition.sideToMove().display(),
-                                     promptSupport.moveHistory(session.moveHistory()),
-                                     rules.legalMovesSummary(rootPosition, legalMoves),
-                                     snapshot);
+            return new ChessAiTurnContext(rootPosition.toFen(),
+                                          rootPosition.sideToMove().display(),
+                                          promptSupport.moveHistory(session.moveHistory()),
+                                          rules.legalMovesSummary(rootPosition, legalMoves),
+                                          snapshot);
         } finally {
             writeLock.unlock();
         }
@@ -628,31 +641,15 @@ public final class ChessGameCoordinator {
         });
     }
 
-    private <T> CompletableFuture<T> startAsync(BackgroundTask<T> task) {
+    private <T> CompletableFuture<T> startAsync(Callable<T> task) {
         CompletableFuture<T> future = new CompletableFuture<>();
         Thread.startVirtualThread(() -> {
             try {
-                future.complete(task.run());
+                future.complete(task.call());
             } catch (Throwable throwable) {
                 future.completeExceptionally(throwable);
             }
         });
         return future;
-    }
-
-    @FunctionalInterface
-    private interface BackgroundTask<T> {
-        T run() throws Exception;
-    }
-
-    private record HumanTurnContext(String humanContext, String legalMovesPrompt, ChessSnapshot snapshot) {
-    }
-
-    private record AiTurnContext(ChessPosition rootPosition,
-                                 String fen,
-                                 String sideToMove,
-                                 String moveHistory,
-                                 String legalMovesPrompt,
-                                 ChessSnapshot snapshot) {
     }
 }

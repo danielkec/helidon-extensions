@@ -234,10 +234,12 @@ Helidon SE declarative example application.
   - returns a typed move-proposal DTO with the AI move and top 3 candidate lines
 - `ChessCommentaryAgent`
   - produces commentary for the accepted move and current position
-- `ChessHumanMoveWorkflowAgent`
-  - models the human-in-the-loop move collection stage as a named agent workflow
+- `ChessTurnWorkflowAgent`
+  - models a full turn workflow that includes the human-in-the-loop move collection stage and the opponent move selection stage
 - `ChessHumanMoveCollectorAgent`
-  - provides the dedicated human-in-the-loop collection step used by the workflow agent
+  - provides the dedicated human-in-the-loop collection step used by the turn workflow
+- `ChessHumanMoveTransitionAgent`, `ChessTurnOutcomeRouterAgent`, and `ChessTurnResultAssemblerAgent`
+  - keep the workflow's deterministic transition, conditional opponent routing, and final turn-result assembly in standalone top-level `*Agent` types
 - `IllegalMoveOutputGuardrail`
   - validates the AI proposal against the legal moves from `ChessRulesService`
   - reprompts on malformed or illegal output while normalizing the structured result
@@ -346,7 +348,9 @@ No blocking open questions for v1 at this stage.
 - 2026-03-25: The UI should show a spinner-style busy indicator while Black is thinking or commentary is still streaming.
 - 2026-03-25: On desktop, the candidate-lines pane should stay contained within the vertical height of the board pane and scroll internally.
 - 2026-03-25: `ChessOpponentAgent` uses typed structured output (`AiMoveProposal`), while the current OCI OpenAI-compatible live path relies on LangChain4j fallback output-format instructions instead of provider-side JSON-schema response formatting.
-- 2026-03-25: AI-facing Java types use the `Agent` suffix consistently, including `ChessCommentaryAgent` and `ChessHumanMoveWorkflowAgent`.
+- 2026-03-31: `ChessTurnWorkflowAgent` owns the full human-plus-opponent turn flow, while deterministic chess state transitions still run in Java between the workflow steps.
+- 2026-03-31: Workflow helper agents are top-level `*Agent` types; nested agent declarations are not used in the chess example.
+- 2026-03-25: AI-facing Java types use the `Agent` suffix consistently, including `ChessCommentaryAgent` and `ChessTurnWorkflowAgent`.
 - 2026-03-25: WebSocket event broadcasting must remove dead sessions on send failure so browser disconnects cannot crash the chess game loop.
 - 2026-03-26: WebSocket event broadcasting now serializes sends per browser session connection to avoid concurrent `WsSession.send(...)` calls against the same Helidon WebSocket session.
 - 2026-03-25: The example uses standard Helidon JUL logging configuration via `logging.properties`, with SLF4J logs bridged into JUL.

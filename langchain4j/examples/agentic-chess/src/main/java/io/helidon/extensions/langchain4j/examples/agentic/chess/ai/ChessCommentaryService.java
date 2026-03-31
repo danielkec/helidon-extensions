@@ -18,6 +18,7 @@ package io.helidon.extensions.langchain4j.examples.agentic.chess.ai;
 
 import java.util.stream.Stream;
 
+import dev.langchain4j.agentic.Agent;
 import io.helidon.extensions.langchain4j.Ai;
 
 import dev.langchain4j.service.MemoryId;
@@ -25,10 +26,10 @@ import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.UserMessage;
 import dev.langchain4j.service.V;
 
-@Ai.Service("chess-commentary-service")
+@Ai.Service("chess-commentary")
 @Ai.StreamingChatModel("agentic-chess-streaming-model")
 @Ai.ChatMemoryProvider("chess-chat-memory")
-public interface ChessCommentaryAgent {
+public interface ChessCommentaryService {
     @SystemMessage("""
             You are a concise live chess commentator for a Helidon LangChain4j example.
             Keep commentary vivid, technical enough to be useful, and limited to a few short sentences.

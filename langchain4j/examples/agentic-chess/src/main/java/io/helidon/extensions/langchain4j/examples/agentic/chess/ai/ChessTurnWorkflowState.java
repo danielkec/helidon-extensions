@@ -16,17 +16,18 @@
 
 package io.helidon.extensions.langchain4j.examples.agentic.chess.ai;
 
-import io.helidon.extensions.langchain4j.Ai;
+final class ChessTurnWorkflowState {
+    static final String FEN_KEY = "fen";
+    static final String HUMAN_MOVE_KEY = "humanMove";
+    static final String LEGAL_MOVES_KEY = "legalMoves";
+    static final String MOVE_HISTORY_KEY = "moveHistory";
+    static final String OPPONENT_DECISION_KEY = "opponentDecision";
+    static final String POST_HUMAN_POSITION_KEY = "postHumanPosition";
+    static final String SIDE_TO_MOVE_KEY = "sideToMove";
+    static final String TURN_ACTIVE_KEY = "turnActive";
+    static final String TURN_RESULT_KEY = "turnResult";
+    static final String WHITE_COMMENTARY_FUTURE_KEY = "whiteCommentaryFuture";
 
-import dev.langchain4j.agentic.declarative.SequenceAgent;
-import dev.langchain4j.service.MemoryId;
-import dev.langchain4j.service.V;
-
-@Ai.Agent("chess-human-move-workflow")
-public interface ChessHumanMoveWorkflowAgent {
-    @SequenceAgent(outputKey = "humanMove", subAgents = ChessHumanMoveCollectorAgent.class)
-    String awaitMove(@MemoryId String sessionId,
-                     @V("hitlBridge") ChessHitlBridge hitlBridge,
-                     @V("humanContext") String humanContext,
-                     @V("legalMoves") String legalMoves);
+    private ChessTurnWorkflowState() {
+    }
 }
