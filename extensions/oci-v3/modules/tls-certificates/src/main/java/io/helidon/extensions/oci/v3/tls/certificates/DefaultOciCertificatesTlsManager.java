@@ -27,6 +27,7 @@ import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 import javax.net.ssl.KeyManagerFactory;
@@ -53,7 +54,9 @@ class DefaultOciCertificatesTlsManager extends ConfiguredTlsManager implements O
     private static final System.Logger LOGGER = System.getLogger(DefaultOciCertificatesTlsManager.class.getName());
 
     private final OciCertificatesTlsManagerConfig cfg;
+    private final boolean alwaysReload;
     private final AtomicReference<String> lastVersionDownloaded = new AtomicReference<>("");
+    private final ReentrantLock reloadLock = new ReentrantLock();
 
     private Supplier<OciPrivateKeyDownloader> pkDownloader;
     private Supplier<OciCertificatesDownloader> certDownloader;
@@ -68,15 +71,31 @@ class DefaultOciCertificatesTlsManager extends ConfiguredTlsManager implements O
                                      Config config) {
         super(name, TYPE);
         this.cfg = Objects.requireNonNull(cfg);
+        this.alwaysReload = cfg.alwaysReload().orElse(cfg.privateKeySource() == OciPrivateKeySource.VAULT);
 
         config.onChange(this::config);
+    }
+
+    static String refreshFailureCategory(RuntimeException failure) {
+        if (failure instanceof UnsupportedOperationException) {
+            return "unsupported-operation";
+        }
+        if (failure instanceof IllegalArgumentException) {
+            return "invalid-tls-material";
+        }
+        if (failure instanceof IllegalStateException) {
+            return "oci-download-or-tls-state";
+        }
+        return "runtime-failure";
     }
 
     @Override // TlsManager
     public void init(TlsConfig tls) {
         this.tlsConfig = tls;
         ServiceRegistry registry = GlobalServiceRegistry.registry();
-        this.pkDownloader = registry.supply(OciPrivateKeyDownloader.class);
+        if (cfg.privateKeySource() == OciPrivateKeySource.VAULT) {
+            this.pkDownloader = registry.supply(OciPrivateKeyDownloader.class);
+        }
         this.certDownloader = registry.supply(OciCertificatesDownloader.class);
         ScheduledExecutorService asyncExecutor = Executors.newSingleThreadScheduledExecutor();
 
@@ -88,6 +107,7 @@ class DefaultOciCertificatesTlsManager extends ConfiguredTlsManager implements O
                 Cron.builder()
                         .executor(asyncExecutor)
                         .expression(cfg.schedule())
+                        .concurrentExecution(false)
                         .task(inv -> maybeReload())
                         .build()
                         .description();
@@ -105,8 +125,15 @@ class DefaultOciCertificatesTlsManager extends ConfiguredTlsManager implements O
 
     // ConfiguredTlsManager
     private void maybeReload() {
-        if (loadContext(false)) {
-            LOGGER.log(System.Logger.Level.DEBUG, "Certificates were downloaded and dynamically updated");
+        try {
+            if (loadContext(false)) {
+                LOGGER.log(System.Logger.Level.DEBUG, "Certificates were downloaded and dynamically updated");
+            }
+        } catch (RuntimeException e) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Failed to refresh OCI certificate " + cfg.certOcid()
+                            + " (failure category: " + refreshFailureCategory(e) + ")"
+                            + "; the previously installed TLS identity remains active and the refresh will be retried");
         }
     }
 
@@ -117,7 +144,9 @@ class DefaultOciCertificatesTlsManager extends ConfiguredTlsManager implements O
      */
     void config(Config config) {
         Objects.requireNonNull(config);
-        maybeReload();
+        if (loadContext(false)) {
+            LOGGER.log(System.Logger.Level.DEBUG, "Certificates were downloaded and dynamically updated");
+        }
     }
 
     /**
@@ -127,21 +156,42 @@ class DefaultOciCertificatesTlsManager extends ConfiguredTlsManager implements O
      * @return true if a reload occurred
      */
     boolean loadContext(boolean initialLoad) {
+        reloadLock.lock();
         try {
             // download all of our security collateral from OCI
             OciCertificatesDownloader cd = certDownloader.get();
-            OciCertificatesDownloader.Certificates certificates = cd.loadCertificates(cfg.certOcid());
-            if (lastVersionDownloaded.get().equals(certificates.version())) {
+            String version;
+            Certificate[] certificates;
+            PrivateKey privateKey = null;
+            if (cfg.privateKeySource() == OciPrivateKeySource.CERTIFICATE_BUNDLE) {
+                OciCertificatesDownloader.CertificatesWithPrivateKey identity =
+                        cd.loadCertificatesWithPrivateKey(cfg.certOcid());
+                version = identity.version();
+                certificates = identity.certificates();
+                privateKey = identity.privateKey();
+            } else {
+                OciCertificatesDownloader.Certificates downloadedCertificates = cd.loadCertificates(cfg.certOcid());
+                version = downloadedCertificates.version();
+                certificates = downloadedCertificates.certificates();
+            }
+
+            if (!alwaysReload && lastVersionDownloaded.get().equals(version)) {
                 return false;
             }
 
             // reset start time for the next update phase
             Certificate ca = cd.loadCACertificate(cfg.caOcid());
 
-            OciPrivateKeyDownloader pd = pkDownloader.get();
-            PrivateKey key = pd.loadKey(cfg.keyOcid(), cfg.vaultCryptoEndpoint());
+            if (privateKey == null) {
+                OciPrivateKeyDownloader privateKeyDownloader = pkDownloader.get();
+                privateKey = privateKeyDownloader.loadKey(cfg.keyOcid(), cfg.vaultCryptoEndpoint());
+            }
+
             SecureRandom secureRandom = secureRandom(tlsConfig);
-            KeyManagerFactory kmf = buildKmf(tlsConfig, secureRandom, key, certificates.certificates());
+            KeyManagerFactory kmf = buildKmf(tlsConfig,
+                                             secureRandom,
+                                             privateKey,
+                                             certificates);
 
             TrustManagerFactory tmf;
             if (tlsConfig.trustAll()) {
@@ -175,9 +225,12 @@ class DefaultOciCertificatesTlsManager extends ConfiguredTlsManager implements O
                 reload(keyManager, trustManager);
             }
 
+            lastVersionDownloaded.set(version);
             return true;
         } catch (KeyStoreException e) {
             throw new IllegalStateException("Error while loading context from OCI", e);
+        } finally {
+            reloadLock.unlock();
         }
     }
 

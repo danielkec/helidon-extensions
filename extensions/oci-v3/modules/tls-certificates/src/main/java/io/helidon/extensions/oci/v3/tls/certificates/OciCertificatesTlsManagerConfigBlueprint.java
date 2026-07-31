@@ -26,8 +26,10 @@ import io.helidon.builder.api.Prototype;
 /**
  * Blueprint configuration for {@link OciCertificatesTlsManager}.
  */
-@Prototype.Blueprint
+@Prototype.Blueprint(decorator = OciCertificatesTlsManagerConfigSupport.BuilderDecorator.class,
+                     createEmptyPublic = false)
 @Prototype.Configured
+@Prototype.IncludeDefaultMethods({"privateKeySource", "alwaysReload"})
 interface OciCertificatesTlsManagerConfigBlueprint extends Prototype.Factory<OciCertificatesTlsManager> {
 
     /**
@@ -40,9 +42,34 @@ interface OciCertificatesTlsManagerConfigBlueprint extends Prototype.Factory<Oci
     String schedule();
 
     /**
+     * Source of the private key used with the certificate.
+     *
+     * @return private key source
+     */
+    @Option.Configured
+    @Option.Default("VAULT")
+    default OciPrivateKeySource privateKeySource() {
+        return OciPrivateKeySource.VAULT;
+    }
+
+    /**
+     * Whether to reload the TLS identity even when the downloaded certificate version has not changed.
+     * When not configured, Vault mode preserves its existing always-reload behavior, while certificate-bundle mode
+     * reloads only when its certificate version changes.
+     *
+     * @return whether unchanged certificate versions should still be reloaded, if explicitly configured
+     */
+    @Option.Configured
+    default Optional<Boolean> alwaysReload() {
+        return Optional.empty();
+    }
+
+    /**
      * The address to use for the OCI Key Management Service / Vault crypto usage.
      * Each OCI Vault has public crypto and management endpoints. We need to specify the crypto endpoint of the vault we are
      * rotating the private keys in. The implementation expects both client and server to store the private key in the same vault.
+     * This option is required when {@link #privateKeySource()} is {@link OciPrivateKeySource#VAULT} and must be omitted for
+     * {@link OciPrivateKeySource#CERTIFICATE_BUNDLE}.
      *
      * @return the address for the key management service / vault crypto usage
      */
@@ -52,6 +79,8 @@ interface OciCertificatesTlsManagerConfigBlueprint extends Prototype.Factory<Oci
     /**
      * The address to use for the OCI Key Management Service / Vault management usage.
      * The crypto endpoint of the vault we are rotating the private keys in.
+     * This option must be omitted when {@link #privateKeySource()} is
+     * {@link OciPrivateKeySource#CERTIFICATE_BUNDLE}.
      *
      * @return the address for the key management service / vault management usage
      */
@@ -83,7 +112,8 @@ interface OciCertificatesTlsManagerConfigBlueprint extends Prototype.Factory<Oci
     String certOcid();
 
     /**
-     * The Key OCID.
+     * The Key OCID. This option is required when {@link #privateKeySource()} is {@link OciPrivateKeySource#VAULT} and must
+     * be omitted for {@link OciPrivateKeySource#CERTIFICATE_BUNDLE}.
      *
      * @return key OCID
      */
@@ -91,7 +121,9 @@ interface OciCertificatesTlsManagerConfigBlueprint extends Prototype.Factory<Oci
     String keyOcid();
 
     /**
-     * The Key password.
+     * The Key password. This option is required when {@link #privateKeySource()} is {@link OciPrivateKeySource#VAULT} and
+     * must be omitted for {@link OciPrivateKeySource#CERTIFICATE_BUNDLE}; OCI bundle passphrases are supplied by OCI and do
+     * not use this value.
      *
      * @return key password
      */

@@ -16,15 +16,20 @@
 
 package io.helidon.extensions.oci.v3.tls.certificates;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.security.PrivateKey;
 import java.util.Objects;
 import java.util.function.Supplier;
 
 import io.helidon.common.Weight;
 import io.helidon.common.Weighted;
+import io.helidon.common.configurable.Resource;
 import io.helidon.common.pki.Keys;
-import io.helidon.config.Config;
+import io.helidon.common.pki.PemKeys;
 import io.helidon.extensions.oci.v3.tls.certificates.spi.OciPrivateKeyDownloader;
 import io.helidon.service.registry.Service;
 
@@ -52,10 +57,21 @@ class TestOciPrivateKeyDownloader implements OciPrivateKeyDownloader {
                 Objects.requireNonNull(keyOcid);
                 Objects.requireNonNull(vaultCryptoEndpoint);
 
-                Keys keys = Keys.builder()
-                        .config(Config.create().get("test-keys"))
-                        .build();
-                return keys.privateKey().orElseThrow();
+                try (InputStream keyStream = TestOciPrivateKeyDownloader.class.getClassLoader()
+                        .getResourceAsStream("test-keys/serverKey.pem")) {
+                    Objects.requireNonNull(keyStream);
+                    String keyPem = new String(keyStream.readAllBytes(), StandardCharsets.US_ASCII);
+                    PemKeys pemKeys = PemKeys.builder()
+                            .key(Resource.create("test private key", keyPem))
+                            .build();
+                    return Keys.builder()
+                            .pem(pemKeys)
+                            .build()
+                            .privateKey()
+                            .orElseThrow();
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
             }
         } catch (Exception e) {
             System.getLogger(getClass().getName()).log(System.Logger.Level.ERROR, e.getMessage(), e);
