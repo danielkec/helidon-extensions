@@ -46,8 +46,6 @@ final class LangchainTypes {
     static final TypeName MODEL_CUSTOM_BUILDER_MAPPING =
             TypeName.create("io.helidon.extensions.langchain4j.AiProvider.CustomBuilderMapping");
     static final TypeName AGENTS_CONFIG = TypeName.create("io.helidon.extensions.langchain4j.AgentsConfig");
-    static final TypeName A2A_AGENT_CONFIG_SUPPORT =
-            TypeName.create("io.helidon.extensions.langchain4j.A2AAgentConfigSupport");
     static final TypeName AGENT_METADATA = TypeName.create("io.helidon.extensions.langchain4j.AgentMetadata");
 
 

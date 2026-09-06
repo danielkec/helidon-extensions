@@ -16,6 +16,7 @@
 
 package io.helidon.extensions.langchain4j;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.Arrays;
@@ -25,6 +26,7 @@ import java.util.function.Consumer;
 
 import io.helidon.common.media.type.MediaTypes;
 import io.helidon.config.Config;
+import io.helidon.config.ConfigMappingException;
 import io.helidon.config.ConfigSources;
 import io.helidon.service.registry.ServiceRegistry;
 import io.helidon.service.registry.ServiceRegistryManager;
@@ -33,6 +35,7 @@ import dev.langchain4j.agentic.declarative.A2AClientAgent;
 import dev.langchain4j.agentic.declarative.A2AClientCustomizer;
 import dev.langchain4j.agentic.declarative.A2AServerUrlSupplier;
 import dev.langchain4j.agentic.declarative.AgentListenerSupplier;
+import dev.langchain4j.agentic.declarative.HumanInTheLoop;
 import dev.langchain4j.agentic.declarative.SequenceAgent;
 import dev.langchain4j.agentic.declarative.TypedKey;
 import dev.langchain4j.agentic.internal.A2AClientBuilder;
@@ -50,6 +53,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.arrayContaining;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
@@ -84,7 +88,7 @@ public class A2AAgentConfigSupportTest {
                 .async(false)
                 .build();
 
-        var agent = A2AAgentConfigSupport.create(AnnotatedAgent.class, config);
+        var agent = config.createA2AAgent(AnnotatedAgent.class);
 
         assertThat(agent, is(notNullValue()));
         assertThat(recordingService.serverUrl, is("https://configured.example.test/a2a"));
@@ -97,7 +101,7 @@ public class A2AAgentConfigSupportTest {
 
     @Test
     void annotationValuesAreFallbacks() {
-        A2AAgentConfigSupport.create(AnnotatedAgent.class, AgentsConfig.create());
+        AgentsConfig.create().createA2AAgent(AnnotatedAgent.class);
 
         assertThat(recordingService.serverUrl, is("a2a+test:annotation"));
         assertThat(recordingService.builder.outputKey, is("annotation-output"));
@@ -106,7 +110,7 @@ public class A2AAgentConfigSupportTest {
 
     @Test
     void supplierAndTypedOutputKeyAreFallbacks() {
-        A2AAgentConfigSupport.create(SuppliedAgent.class, AgentsConfig.create());
+        AgentsConfig.create().createA2AAgent(SuppliedAgent.class);
 
         assertThat(recordingService.serverUrl, is("urn:a2a:supplied"));
         assertThat(recordingService.builder.outputKey, is("TypedOutput"));
@@ -131,10 +135,10 @@ public class A2AAgentConfigSupportTest {
     @Test
     void rejectsConflictingAnnotationSources() {
         var error = assertThrows(IllegalArgumentException.class,
-                                 () -> A2AAgentConfigSupport.create(ConflictingAgent.class,
-                                                                   AgentsConfig.builder()
-                                                                           .a2aServerUrl("https://override.example.test")
-                                                                           .build()));
+                                 () -> AgentsConfig.builder()
+                                         .a2aServerUrl("https://override.example.test")
+                                         .build()
+                                         .createA2AAgent(ConflictingAgent.class));
 
         assertThat(error.getMessage(), containsString("not both"));
     }
@@ -142,31 +146,31 @@ public class A2AAgentConfigSupportTest {
     @Test
     void rejectsMissingAndInvalidUrls() {
         var missing = assertThrows(IllegalArgumentException.class,
-                                   () -> A2AAgentConfigSupport.create(MissingUrlAgent.class, AgentsConfig.create()));
+                                   () -> AgentsConfig.create().createA2AAgent(MissingUrlAgent.class));
         assertThat(missing.getMessage(), containsString("requires"));
 
         var invalid = assertThrows(IllegalArgumentException.class,
-                                   () -> A2AAgentConfigSupport.create(MissingUrlAgent.class,
-                                                                     AgentsConfig.builder()
-                                                                             .a2aServerUrl("a2a+test:configured")
-                                                                             .build()));
+                                   () -> AgentsConfig.builder()
+                                           .a2aServerUrl("a2a+test:configured")
+                                           .build()
+                                           .createA2AAgent(MissingUrlAgent.class));
         assertThat(invalid.getMessage(), containsString("absolute HTTP or HTTPS URI"));
 
         var invalidPort = assertThrows(IllegalArgumentException.class,
-                                       () -> A2AAgentConfigSupport.create(MissingUrlAgent.class,
-                                                                         AgentsConfig.builder()
-                                                                                 .a2aServerUrl("http://example.test:99999")
-                                                                                 .build()));
+                                       () -> AgentsConfig.builder()
+                                               .a2aServerUrl("http://example.test:99999")
+                                               .build()
+                                               .createA2AAgent(MissingUrlAgent.class));
         assertThat(invalidPort.getMessage(), containsString("absolute HTTP or HTTPS URI"));
     }
 
     @Test
     void configuredOutputDoesNotMaskInvalidAnnotationOutput() {
         var error = assertThrows(AgenticSystemConfigurationException.class,
-                                 () -> A2AAgentConfigSupport.create(InvalidOutputAgent.class,
-                                                                   AgentsConfig.builder()
-                                                                           .outputKey("configured-output")
-                                                                           .build()));
+                                 () -> AgentsConfig.builder()
+                                         .outputKey("configured-output")
+                                         .build()
+                                         .createA2AAgent(InvalidOutputAgent.class));
 
         assertThat(error.getMessage(), containsString("Both outputKey and typedOutputKey"));
     }
@@ -176,7 +180,7 @@ public class A2AAgentConfigSupportTest {
         A2AService.setA2AService(new MissingA2AService());
 
         var error = assertThrows(IllegalStateException.class,
-                                 () -> A2AAgentConfigSupport.create(AnnotatedAgent.class, AgentsConfig.create()));
+                                 () -> AgentsConfig.create().createA2AAgent(AnnotatedAgent.class));
 
         assertThat(error.getMessage(), containsString("dev.langchain4j:langchain4j-agentic-a2a"));
     }
@@ -191,8 +195,30 @@ public class A2AAgentConfigSupportTest {
     }
 
     @Test
+    void disabledTopLevelA2AAgentDoesNotStartDiscovery() throws ReflectiveOperationException {
+        var manager = ServiceRegistryManager.create();
+        try {
+            var generatedType = Class.forName(getClass().getPackageName()
+                                                      + ".A2AAgentConfigSupportTest_AnnotatedAgent__AiAgent");
+            var constructor = generatedType.getDeclaredConstructor(Config.class, ServiceRegistry.class);
+            constructor.setAccessible(true);
+            var supplier = constructor.newInstance(disabledAnnotatedAgentConfig(), manager.registry());
+            var get = generatedType.getDeclaredMethod("get");
+            get.setAccessible(true);
+
+            var error = assertThrows(InvocationTargetException.class, () -> get.invoke(supplier));
+
+            assertThat(error.getCause(), instanceOf(IllegalStateException.class));
+            assertThat(error.getCause().getMessage(), containsString("disabled"));
+            assertThat(recordingService.builder, is(nullValue()));
+        } finally {
+            manager.shutdown();
+        }
+    }
+
+    @Test
     void composedAgentTakesPrecedenceOverInheritedA2AAgent() throws ReflectiveOperationException {
-        assertThat(A2AAgentConfigSupport.isA2A(ComposedAgent.class), is(false));
+        assertThat(AgentsConfig.isA2ASubAgent(ComposedAgent.class), is(false));
 
         var generatedType = Class.forName(getClass().getPackageName()
                                                   + ".A2AAgentConfigSupportTest_ComposedAgent__AiAgent");
@@ -200,6 +226,67 @@ public class A2AAgentConfigSupportTest {
 
         assertThat(Arrays.asList(constructor.getParameterTypes()),
                    contains(Config.class, ServiceRegistry.class, Optional.class));
+    }
+
+    @Test
+    void humanInTheLoopRetainsDistinctTopLevelAndNestedPrecedence() throws ReflectiveOperationException {
+        var invalidConfig = invalidHumanAgentConfig();
+        assertThrows(ConfigMappingException.class,
+                     () -> AgentsConfig.create(invalidConfig.get("langchain4j.agents.human-a2a")));
+
+        var manager = ServiceRegistryManager.create();
+        try {
+            var composedType = Class.forName(getClass().getPackageName()
+                                                     + ".A2AAgentConfigSupportTest_ComposedAgent__AiAgent");
+            var composedConstructor = composedType.getDeclaredConstructor(Config.class,
+                                                                          ServiceRegistry.class,
+                                                                          Optional.class);
+            composedConstructor.setAccessible(true);
+            var composedSupplier = composedConstructor.newInstance(invalidConfig,
+                                                                   manager.registry(),
+                                                                   Optional.empty());
+            var resolver = composedType.getDeclaredMethod("resolveSubAgent", Class.class);
+            resolver.setAccessible(true);
+
+            assertThat(resolver.invoke(composedSupplier, HumanAndA2AAgent.class), is(nullValue()));
+            assertThat(recordingService.builder, is(nullValue()));
+
+            var generatedType = Class.forName(getClass().getPackageName()
+                                                      + ".A2AAgentConfigSupportTest_HumanAndA2AAgent__AiAgent");
+            var constructor = generatedType.getDeclaredConstructor(Config.class, ServiceRegistry.class);
+            constructor.setAccessible(true);
+            var supplier = constructor.newInstance(Config.empty(), manager.registry());
+            var get = generatedType.getDeclaredMethod("get");
+            get.setAccessible(true);
+
+            assertThat(get.invoke(supplier), instanceOf(HumanAndA2AAgent.class));
+            assertThat(recordingService.serverUrl, is("https://human-a2a.example.test"));
+        } finally {
+            manager.shutdown();
+        }
+    }
+
+    @Test
+    void disabledNestedA2AAgentDoesNotStartDiscovery() throws ReflectiveOperationException {
+        var manager = ServiceRegistryManager.create();
+        try {
+            var generatedType = Class.forName(getClass().getPackageName()
+                                                      + ".A2AAgentConfigSupportTest_ComposedAgent__AiAgent");
+            var constructor = generatedType.getDeclaredConstructor(Config.class, ServiceRegistry.class, Optional.class);
+            constructor.setAccessible(true);
+            var supplier = constructor.newInstance(disabledAnnotatedAgentConfig(), manager.registry(), Optional.empty());
+            var resolver = generatedType.getDeclaredMethod("resolveSubAgent", Class.class);
+            resolver.setAccessible(true);
+
+            var error = assertThrows(InvocationTargetException.class,
+                                     () -> resolver.invoke(supplier, AnnotatedAgent.class));
+
+            assertThat(error.getCause(), instanceOf(IllegalStateException.class));
+            assertThat(error.getCause().getMessage(), containsString("disabled"));
+            assertThat(recordingService.builder, is(nullValue()));
+        } finally {
+            manager.shutdown();
+        }
     }
 
     @Test
@@ -218,6 +305,29 @@ public class A2AAgentConfigSupportTest {
         } finally {
             manager.shutdown();
         }
+    }
+
+    private static Config disabledAnnotatedAgentConfig() {
+        // language=YAML
+        String yaml = """
+                langchain4j:
+                  agents:
+                    annotated-a2a:
+                      enabled: false
+                """;
+        return Config.just(ConfigSources.create(yaml, MediaTypes.APPLICATION_X_YAML));
+    }
+
+    private static Config invalidHumanAgentConfig() {
+        // language=YAML
+        String yaml = """
+                langchain4j:
+                  agents:
+                    human-a2a:
+                      tools:
+                        - missing.test.Tool
+                """;
+        return Config.just(ConfigSources.create(yaml, MediaTypes.APPLICATION_X_YAML));
     }
 
     @Ai.Agent("annotated-a2a")
@@ -285,6 +395,17 @@ public class A2AAgentConfigSupportTest {
     public interface UnannotatedWorkflow {
         @SequenceAgent(subAgents = UnannotatedAgent.class)
         String compose(@V("question") String question);
+    }
+
+    @Ai.Agent("human-a2a")
+    public interface HumanAndA2AAgent {
+        @HumanInTheLoop
+        static String review(@V("question") String question) {
+            return question;
+        }
+
+        @A2AClientAgent(a2aServerUrl = "https://human-a2a.example.test")
+        String ask(@V("question") String question);
     }
 
     public static class TypedOutput implements TypedKey<String> {

@@ -40,7 +40,6 @@ import static io.helidon.common.types.AccessModifier.PACKAGE_PRIVATE;
 import static io.helidon.common.types.AccessModifier.PRIVATE;
 import static io.helidon.common.types.TypeNames.CLASS_WILDCARD;
 import static io.helidon.common.types.TypeNames.STRING;
-import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.A2A_AGENT_CONFIG_SUPPORT;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.AGENTS_CONFIG;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.AGENT_METADATA;
 import static io.helidon.extensions.langchain4j.codegen.LangchainTypes.AI_AGENT;
@@ -56,6 +55,7 @@ import static io.helidon.service.codegen.ServiceCodegenTypes.SERVICE_QUALIFIER;
 import static io.helidon.service.codegen.ServiceCodegenTypes.SERVICE_REGISTRY;
 
 class AgentCodegen implements CodegenExtension {
+    static final String AGENTS_CONFIG_KEY = "langchain4j.agents";
     private static final TypeName GENERATOR = TypeName.create(AgentCodegen.class);
     private static final Set<TypeName> COMPOSED_AGENT_ANNOTATIONS = Set.of(
             TypeName.create("dev.langchain4j.agentic.declarative.SequenceAgent"),
@@ -65,7 +65,6 @@ class AgentCodegen implements CodegenExtension {
             TypeName.create("dev.langchain4j.agentic.declarative.ParallelMapperAgent"),
             TypeName.create("dev.langchain4j.agentic.declarative.SupervisorAgent"),
             TypeName.create("dev.langchain4j.agentic.declarative.PlannerAgent"));
-    static final String AGENTS_CONFIG_KEY = "langchain4j.agents";
 
     @Override
     public void process(RoundContext roundCtx) {
@@ -158,11 +157,9 @@ class AgentCodegen implements CodegenExtension {
                     .addContent(agentInterfaceType)
                     .addContentLine(".class);");
             if (a2aAgent) {
-                get.addContent("return ")
-                        .addContent(A2A_AGENT_CONFIG_SUPPORT)
-                        .addContent(".create(")
+                get.addContent("return agentsConfig.createA2AAgent(")
                         .addContent(agentInterfaceType)
-                        .addContentLine(".class, agentsConfig);");
+                        .addContentLine(".class);");
             } else {
                 get.addContent("var configuredModel = agentsConfig.chatModel()")
                         .increaseContentPadding()
@@ -300,8 +297,8 @@ class AgentCodegen implements CodegenExtension {
                                       .build())
                 .name("resolveSubAgent")
                 .addContent("if (!")
-                .addContent(A2A_AGENT_CONFIG_SUPPORT)
-                .addContentLine(".isA2A(cls)) {")
+                .addContent(AGENTS_CONFIG)
+                .addContentLine(".isA2ASubAgent(cls)) {")
                 .increaseContentPadding()
                 .addContentLine("return null;")
                 .decreaseContentPadding()
@@ -316,9 +313,7 @@ class AgentCodegen implements CodegenExtension {
                 .decreaseContentPadding()
                 .addContentLine("}")
                 .addContentLine("// Each workflow needs a fresh A2A proxy because it carries mutable parent state")
-                .addContent("return ")
-                .addContent(A2A_AGENT_CONFIG_SUPPORT)
-                .addContentLine(".create(cls, agentsConfig(cls));");
+                .addContentLine("return agentsConfig(cls).createA2AAgent(cls);");
     }
 
     private boolean isA2AAgent(TypeInfo typeInfo) {

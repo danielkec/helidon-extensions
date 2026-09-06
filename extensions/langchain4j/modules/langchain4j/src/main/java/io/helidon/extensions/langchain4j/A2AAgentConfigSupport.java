@@ -20,8 +20,6 @@ import java.net.URI;
 import java.util.Locale;
 import java.util.stream.Stream;
 
-import io.helidon.common.Api;
-
 import dev.langchain4j.agentic.AgenticServices;
 import dev.langchain4j.agentic.declarative.A2AClientAgent;
 import dev.langchain4j.agentic.declarative.A2AClientCustomizer;
@@ -48,8 +46,7 @@ import static dev.langchain4j.agentic.internal.AgentUtil.getAnnotatedMethodOnCla
 /**
  * Runtime support for applying Helidon configuration to LangChain4j A2A client agents.
  */
-@Api.Internal
-public final class A2AAgentConfigSupport {
+final class A2AAgentConfigSupport {
     private static final String A2A_DEPENDENCY = "dev.langchain4j:langchain4j-agentic-a2a";
 
     private A2AAgentConfigSupport() {
@@ -61,7 +58,7 @@ public final class A2AAgentConfigSupport {
      * @param agentType agent service type
      * @return whether the type is an A2A client agent
      */
-    public static boolean isA2A(Class<?> agentType) {
+    static boolean isA2A(Class<?> agentType) {
         return getAnnotatedMethodOnClass(agentType, A2AClientAgent.class).isPresent()
                 && Stream.of(SequenceAgent.class,
                              LoopAgent.class,
@@ -82,7 +79,11 @@ public final class A2AAgentConfigSupport {
      * @param <T> agent service type
      * @return configured A2A client agent
      */
-    public static <T> T create(Class<T> agentType, AgentsConfig config) {
+    static <T> T create(Class<T> agentType, AgentsConfig config) {
+        if (!config.enabled()) {
+            throw new IllegalStateException("Cannot create A2A agent " + agentType.getName()
+                                                    + " when its configuration is disabled");
+        }
         var agentMethod = getAnnotatedMethodOnClass(agentType, A2AClientAgent.class)
                 .orElseThrow(() -> new IllegalArgumentException("Type " + agentType.getName()
                                                                          + " is not an A2A client agent"));
