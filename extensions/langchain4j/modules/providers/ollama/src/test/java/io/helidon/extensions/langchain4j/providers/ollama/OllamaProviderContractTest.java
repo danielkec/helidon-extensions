@@ -45,10 +45,10 @@ import dev.langchain4j.model.ollama.OllamaStreamingChatModel;
 import org.junit.jupiter.api.Test;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
 @ServerTest
 class OllamaProviderContractTest {
@@ -139,8 +139,8 @@ class OllamaProviderContractTest {
                                .collect(Collectors.joining()),
                        is("ollama-stream-ok"));
             assertThat(languageModel.generate("language-contract-prompt").content(), is("ollama-language-ok"));
-            assertArrayEquals(new float[] {0.125F, -0.5F, 0.75F},
-                              embeddingModel.embed("embedding-contract-prompt").content().vector());
+            assertThat(embeddingModel.embed("embedding-contract-prompt").content().vectorAsList(),
+                       contains(0.125F, -0.5F, 0.75F));
         } finally {
             registryManager.shutdown();
         }

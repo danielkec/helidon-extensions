@@ -43,11 +43,10 @@ import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import org.junit.jupiter.api.Test;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @ServerTest
 class OpenAiProviderContractTest {
@@ -127,8 +126,8 @@ class OpenAiProviderContractTest {
             ContractStreamingService streamingService = registry.get(ContractStreamingService.class);
             assertThat(streamingService.chat("stream contract prompt").collect(Collectors.joining()),
                        is("openai-stream-ok"));
-            assertArrayEquals(new float[] {0.125F, -0.5F, 0.75F},
-                              embeddingModel.embed("embedding contract prompt").content().vector());
+            assertThat(embeddingModel.embed("embedding contract prompt").content().vectorAsList(),
+                       contains(0.125F, -0.5F, 0.75F));
         } finally {
             registryManager.shutdown();
         }
@@ -154,8 +153,10 @@ class OpenAiProviderContractTest {
         CapturedRequest embeddingRequest = REQUESTS.remove();
         assertThat(embeddingRequest.path(), is("/v1/embeddings"));
         assertCommonRequest(embeddingRequest);
-        assertTrue(embeddingRequest.body()
-                           .matches("(?s).*\"input\"\\s*:\\s*\\[\\s*\"embedding contract prompt\"\\s*].*"));
+        assertThat("Expected embedding input array in: " + embeddingRequest.body(),
+                   embeddingRequest.body()
+                           .matches("(?s).*\"input\"\\s*:\\s*\\[\\s*\"embedding contract prompt\"\\s*].*"),
+                   is(true));
         assertThat(compactJson(embeddingRequest.body()), containsString("\"model\":\"contract-model\""));
         assertThat(compactJson(embeddingRequest.body()), containsString("\"dimensions\":3"));
         assertThat(compactJson(embeddingRequest.body()), containsString("\"encoding_format\":\"float\""));
