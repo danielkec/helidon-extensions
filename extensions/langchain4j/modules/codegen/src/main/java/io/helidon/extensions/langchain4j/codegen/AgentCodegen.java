@@ -17,7 +17,7 @@
 package io.helidon.extensions.langchain4j.codegen;
 
 import java.util.Collection;
-import java.util.Set;
+import java.util.List;
 
 import io.helidon.codegen.CodegenException;
 import io.helidon.codegen.CodegenUtil;
@@ -57,7 +57,9 @@ import static io.helidon.service.codegen.ServiceCodegenTypes.SERVICE_REGISTRY;
 class AgentCodegen implements CodegenExtension {
     static final String AGENTS_CONFIG_KEY = "langchain4j.agents";
     private static final TypeName GENERATOR = TypeName.create(AgentCodegen.class);
-    private static final Set<TypeName> COMPOSED_AGENT_ANNOTATIONS = Set.of(
+    private static final TypeName LC_HUMAN_IN_THE_LOOP =
+            TypeName.create("dev.langchain4j.agentic.declarative.HumanInTheLoop");
+    private static final List<TypeName> COMPOSED_AGENT_ANNOTATIONS = List.of(
             TypeName.create("dev.langchain4j.agentic.declarative.SequenceAgent"),
             TypeName.create("dev.langchain4j.agentic.declarative.LoopAgent"),
             TypeName.create("dev.langchain4j.agentic.declarative.ConditionalAgent"),
@@ -182,6 +184,7 @@ class AgentCodegen implements CodegenExtension {
 
         classModel.addMethod(this::addAgentsConfigMethod);
         classModel.addMethod(this::addConfigureSubAgentsMethod);
+        classModel.addMethod(this::addIsA2ASubAgentMethod);
         classModel.addMethod(this::addResolveSubAgentMethod);
 
         roundCtx.addGeneratedType(generatedType, classModel, agentInterfaceType, agentInterface.originatingElementValue());
@@ -288,6 +291,43 @@ class AgentCodegen implements CodegenExtension {
                 .addContentLine("agentsConfig(cls).configure(ctx, registry);");
     }
 
+    private void addIsA2ASubAgentMethod(Method.Builder mb) {
+        mb.accessModifier(PRIVATE)
+                .returnType(TypeNames.PRIMITIVE_BOOLEAN)
+                .addParameter(Parameter.builder()
+                                      .name("agentType")
+                                      .type(CLASS_WILDCARD)
+                                      .build())
+                .name("isA2ASubAgent")
+                .addContentLine("boolean a2a = false;")
+                .addContentLine("for (var method : agentType.getMethods()) {")
+                .increaseContentPadding();
+        for (TypeName annotation : COMPOSED_AGENT_ANNOTATIONS) {
+            addHigherPrecedenceAnnotationCheck(mb, annotation);
+        }
+        addHigherPrecedenceAnnotationCheck(mb, LC_HUMAN_IN_THE_LOOP);
+        mb.addContent("if (method.isAnnotationPresent(")
+                .addContent(LC_A2A_CLIENT_AGENT)
+                .addContentLine(".class)) {")
+                .increaseContentPadding()
+                .addContentLine("a2a = true;")
+                .decreaseContentPadding()
+                .addContentLine("}")
+                .decreaseContentPadding()
+                .addContentLine("}")
+                .addContentLine("return a2a;");
+    }
+
+    private void addHigherPrecedenceAnnotationCheck(Method.Builder mb, TypeName annotation) {
+        mb.addContent("if (method.isAnnotationPresent(")
+                .addContent(annotation)
+                .addContentLine(".class)) {")
+                .increaseContentPadding()
+                .addContentLine("return false;")
+                .decreaseContentPadding()
+                .addContentLine("}");
+    }
+
     private void addResolveSubAgentMethod(Method.Builder mb) {
         mb.accessModifier(PRIVATE)
                 .returnType(TypeNames.OBJECT)
@@ -296,9 +336,7 @@ class AgentCodegen implements CodegenExtension {
                                       .type(CLASS_WILDCARD)
                                       .build())
                 .name("resolveSubAgent")
-                .addContent("if (!")
-                .addContent(AGENTS_CONFIG)
-                .addContentLine(".isA2ASubAgent(cls)) {")
+                .addContentLine("if (!isA2ASubAgent(cls)) {")
                 .increaseContentPadding()
                 .addContentLine("return null;")
                 .decreaseContentPadding()

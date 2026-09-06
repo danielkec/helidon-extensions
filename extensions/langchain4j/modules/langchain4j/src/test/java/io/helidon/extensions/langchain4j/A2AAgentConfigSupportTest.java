@@ -16,10 +16,8 @@
 
 package io.helidon.extensions.langchain4j;
 
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
-import java.util.Arrays;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -28,7 +26,7 @@ import io.helidon.common.media.type.MediaTypes;
 import io.helidon.config.Config;
 import io.helidon.config.ConfigMappingException;
 import io.helidon.config.ConfigSources;
-import io.helidon.service.registry.ServiceRegistry;
+import io.helidon.service.registry.ServiceRegistryConfig;
 import io.helidon.service.registry.ServiceRegistryManager;
 
 import dev.langchain4j.agentic.declarative.A2AClientAgent;
@@ -51,9 +49,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.arrayContaining;
-import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
@@ -186,80 +182,22 @@ public class A2AAgentConfigSupportTest {
     }
 
     @Test
-    void generatedTopLevelA2AAgentDoesNotRequireChatModel() throws ReflectiveOperationException {
-        var generatedType = Class.forName(getClass().getPackageName()
-                                                  + ".A2AAgentConfigSupportTest_AnnotatedAgent__AiAgent");
-        var constructor = generatedType.getDeclaredConstructors()[0];
+    void rejectsNullAgentType() {
+        var error = assertThrows(NullPointerException.class,
+                                 () -> AgentsConfig.create().createA2AAgent(null));
 
-        assertThat(Arrays.asList(constructor.getParameterTypes()), contains(Config.class, ServiceRegistry.class));
+        assertThat(error.getMessage(), is("agentType"));
+        assertThat(recordingService.builder, is(nullValue()));
     }
 
     @Test
-    void disabledTopLevelA2AAgentDoesNotStartDiscovery() throws ReflectiveOperationException {
-        var manager = ServiceRegistryManager.create();
+    void createsTopLevelA2AAgentThroughRegistryWithoutChatModel() {
+        var manager = registryManager(Config.empty());
         try {
-            var generatedType = Class.forName(getClass().getPackageName()
-                                                      + ".A2AAgentConfigSupportTest_AnnotatedAgent__AiAgent");
-            var constructor = generatedType.getDeclaredConstructor(Config.class, ServiceRegistry.class);
-            constructor.setAccessible(true);
-            var supplier = constructor.newInstance(disabledAnnotatedAgentConfig(), manager.registry());
-            var get = generatedType.getDeclaredMethod("get");
-            get.setAccessible(true);
+            var agent = manager.registry().get(HumanAndA2AAgent.class);
 
-            var error = assertThrows(InvocationTargetException.class, () -> get.invoke(supplier));
-
-            assertThat(error.getCause(), instanceOf(IllegalStateException.class));
-            assertThat(error.getCause().getMessage(), containsString("disabled"));
-            assertThat(recordingService.builder, is(nullValue()));
-        } finally {
-            manager.shutdown();
-        }
-    }
-
-    @Test
-    void composedAgentTakesPrecedenceOverInheritedA2AAgent() throws ReflectiveOperationException {
-        assertThat(AgentsConfig.isA2ASubAgent(ComposedAgent.class), is(false));
-
-        var generatedType = Class.forName(getClass().getPackageName()
-                                                  + ".A2AAgentConfigSupportTest_ComposedAgent__AiAgent");
-        var constructor = generatedType.getDeclaredConstructors()[0];
-
-        assertThat(Arrays.asList(constructor.getParameterTypes()),
-                   contains(Config.class, ServiceRegistry.class, Optional.class));
-    }
-
-    @Test
-    void humanInTheLoopRetainsDistinctTopLevelAndNestedPrecedence() throws ReflectiveOperationException {
-        var invalidConfig = invalidHumanAgentConfig();
-        assertThrows(ConfigMappingException.class,
-                     () -> AgentsConfig.create(invalidConfig.get("langchain4j.agents.human-a2a")));
-
-        var manager = ServiceRegistryManager.create();
-        try {
-            var composedType = Class.forName(getClass().getPackageName()
-                                                     + ".A2AAgentConfigSupportTest_ComposedAgent__AiAgent");
-            var composedConstructor = composedType.getDeclaredConstructor(Config.class,
-                                                                          ServiceRegistry.class,
-                                                                          Optional.class);
-            composedConstructor.setAccessible(true);
-            var composedSupplier = composedConstructor.newInstance(invalidConfig,
-                                                                   manager.registry(),
-                                                                   Optional.empty());
-            var resolver = composedType.getDeclaredMethod("resolveSubAgent", Class.class);
-            resolver.setAccessible(true);
-
-            assertThat(resolver.invoke(composedSupplier, HumanAndA2AAgent.class), is(nullValue()));
-            assertThat(recordingService.builder, is(nullValue()));
-
-            var generatedType = Class.forName(getClass().getPackageName()
-                                                      + ".A2AAgentConfigSupportTest_HumanAndA2AAgent__AiAgent");
-            var constructor = generatedType.getDeclaredConstructor(Config.class, ServiceRegistry.class);
-            constructor.setAccessible(true);
-            var supplier = constructor.newInstance(Config.empty(), manager.registry());
-            var get = generatedType.getDeclaredMethod("get");
-            get.setAccessible(true);
-
-            assertThat(get.invoke(supplier), instanceOf(HumanAndA2AAgent.class));
+            assertThat(agent, is(notNullValue()));
+            assertThat(recordingService.builder.agentType.getName(), is(HumanAndA2AAgent.class.getName()));
             assertThat(recordingService.serverUrl, is("https://human-a2a.example.test"));
         } finally {
             manager.shutdown();
@@ -267,22 +205,13 @@ public class A2AAgentConfigSupportTest {
     }
 
     @Test
-    void disabledNestedA2AAgentDoesNotStartDiscovery() throws ReflectiveOperationException {
-        var manager = ServiceRegistryManager.create();
+    void disabledTopLevelA2AAgentDoesNotStartDiscovery() {
+        var manager = registryManager(disabledHumanAgentConfig());
         try {
-            var generatedType = Class.forName(getClass().getPackageName()
-                                                      + ".A2AAgentConfigSupportTest_ComposedAgent__AiAgent");
-            var constructor = generatedType.getDeclaredConstructor(Config.class, ServiceRegistry.class, Optional.class);
-            constructor.setAccessible(true);
-            var supplier = constructor.newInstance(disabledAnnotatedAgentConfig(), manager.registry(), Optional.empty());
-            var resolver = generatedType.getDeclaredMethod("resolveSubAgent", Class.class);
-            resolver.setAccessible(true);
+            var error = assertThrows(IllegalStateException.class,
+                                     () -> manager.registry().get(HumanAndA2AAgent.class));
 
-            var error = assertThrows(InvocationTargetException.class,
-                                     () -> resolver.invoke(supplier, AnnotatedAgent.class));
-
-            assertThat(error.getCause(), instanceOf(IllegalStateException.class));
-            assertThat(error.getCause().getMessage(), containsString("disabled"));
+            assertThat(error.getMessage(), containsString("disabled"));
             assertThat(recordingService.builder, is(nullValue()));
         } finally {
             manager.shutdown();
@@ -290,21 +219,40 @@ public class A2AAgentConfigSupportTest {
     }
 
     @Test
-    void unannotatedA2ASubAgentFallsThroughToLangChain4j() throws ReflectiveOperationException {
-        var manager = ServiceRegistryManager.create();
-        try {
-            var generatedType = Class.forName(getClass().getPackageName()
-                                                      + ".A2AAgentConfigSupportTest_UnannotatedWorkflow__AiAgent");
-            var constructor = generatedType.getDeclaredConstructor(Config.class, ServiceRegistry.class, Optional.class);
-            constructor.setAccessible(true);
-            var supplier = constructor.newInstance(Config.empty(), manager.registry(), Optional.empty());
-            var resolver = generatedType.getDeclaredMethod("resolveSubAgent", Class.class);
-            resolver.setAccessible(true);
+    void composedAgentTakesPrecedenceOverInheritedA2AAgent() {
+        var invalidConfig = invalidHumanAgentConfig();
+        assertThrows(ConfigMappingException.class,
+                     () -> AgentsConfig.create(invalidConfig.get("langchain4j.agents.human-a2a")));
 
-            assertThat(resolver.invoke(supplier, UnannotatedAgent.class), is(nullValue()));
+        var manager = registryManager(invalidConfig);
+        try {
+            var agent = manager.registry().get(ComposedAgent.class);
+
+            assertThat(agent, is(notNullValue()));
+            assertThat(recordingService.builder, is(nullValue()));
         } finally {
             manager.shutdown();
         }
+    }
+
+    @Test
+    void disabledNestedA2AAgentDoesNotStartDiscovery() {
+        var manager = registryManager(disabledAnnotatedAgentConfig());
+        try {
+            var error = assertThrows(IllegalStateException.class,
+                                     () -> manager.registry().get(NestedA2AWorkflow.class));
+
+            assertThat(error.getMessage(), containsString("disabled"));
+            assertThat(recordingService.builder, is(nullValue()));
+        } finally {
+            manager.shutdown();
+        }
+    }
+
+    private static ServiceRegistryManager registryManager(Config config) {
+        return ServiceRegistryManager.create(ServiceRegistryConfig.builder()
+                                                     .putContractInstance(Config.class, config)
+                                                     .build());
     }
 
     private static Config disabledAnnotatedAgentConfig() {
@@ -313,6 +261,17 @@ public class A2AAgentConfigSupportTest {
                 langchain4j:
                   agents:
                     annotated-a2a:
+                      enabled: false
+                """;
+        return Config.just(ConfigSources.create(yaml, MediaTypes.APPLICATION_X_YAML));
+    }
+
+    private static Config disabledHumanAgentConfig() {
+        // language=YAML
+        String yaml = """
+                langchain4j:
+                  agents:
+                    human-a2a:
                       enabled: false
                 """;
         return Config.just(ConfigSources.create(yaml, MediaTypes.APPLICATION_X_YAML));
@@ -382,18 +341,7 @@ public class A2AAgentConfigSupportTest {
 
     @Ai.Agent("composed-agent")
     public interface ComposedAgent extends AnnotatedAgent {
-        @SequenceAgent(subAgents = AnnotatedAgent.class)
-        String compose(@V("question") String question);
-    }
-
-    public interface UnannotatedAgent {
-        @A2AClientAgent(a2aServerUrl = "https://annotation.example.test/a2a")
-        String ask(@V("question") String question);
-    }
-
-    @Ai.Agent("unannotated-workflow")
-    public interface UnannotatedWorkflow {
-        @SequenceAgent(subAgents = UnannotatedAgent.class)
+        @SequenceAgent(subAgents = HumanAndA2AAgent.class)
         String compose(@V("question") String question);
     }
 
@@ -406,6 +354,12 @@ public class A2AAgentConfigSupportTest {
 
         @A2AClientAgent(a2aServerUrl = "https://human-a2a.example.test")
         String ask(@V("question") String question);
+    }
+
+    @Ai.Agent("nested-a2a-workflow")
+    public interface NestedA2AWorkflow {
+        @SequenceAgent(subAgents = AnnotatedAgent.class)
+        String compose(@V("question") String question);
     }
 
     public static class TypedOutput implements TypedKey<String> {

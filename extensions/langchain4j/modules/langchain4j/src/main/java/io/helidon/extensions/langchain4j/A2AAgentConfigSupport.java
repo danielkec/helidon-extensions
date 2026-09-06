@@ -25,14 +25,6 @@ import dev.langchain4j.agentic.declarative.A2AClientAgent;
 import dev.langchain4j.agentic.declarative.A2AClientCustomizer;
 import dev.langchain4j.agentic.declarative.A2AServerUrlSupplier;
 import dev.langchain4j.agentic.declarative.AgentListenerSupplier;
-import dev.langchain4j.agentic.declarative.ConditionalAgent;
-import dev.langchain4j.agentic.declarative.HumanInTheLoop;
-import dev.langchain4j.agentic.declarative.LoopAgent;
-import dev.langchain4j.agentic.declarative.ParallelAgent;
-import dev.langchain4j.agentic.declarative.ParallelMapperAgent;
-import dev.langchain4j.agentic.declarative.PlannerAgent;
-import dev.langchain4j.agentic.declarative.SequenceAgent;
-import dev.langchain4j.agentic.declarative.SupervisorAgent;
 import dev.langchain4j.agentic.internal.A2AClientBuilder;
 import dev.langchain4j.agentic.internal.AgentInvoker;
 import dev.langchain4j.agentic.internal.AgentUtil;
@@ -50,25 +42,6 @@ final class A2AAgentConfigSupport {
     private static final String A2A_DEPENDENCY = "dev.langchain4j:langchain4j-agentic-a2a";
 
     private A2AAgentConfigSupport() {
-    }
-
-    /**
-     * Whether the type declares an A2A client agent method.
-     *
-     * @param agentType agent service type
-     * @return whether the type is an A2A client agent
-     */
-    static boolean isA2A(Class<?> agentType) {
-        return getAnnotatedMethodOnClass(agentType, A2AClientAgent.class).isPresent()
-                && Stream.of(SequenceAgent.class,
-                             LoopAgent.class,
-                             ConditionalAgent.class,
-                             ParallelAgent.class,
-                             ParallelMapperAgent.class,
-                             SupervisorAgent.class,
-                             PlannerAgent.class,
-                             HumanInTheLoop.class)
-                .noneMatch(annotation -> getAnnotatedMethodOnClass(agentType, annotation).isPresent());
     }
 
     /**

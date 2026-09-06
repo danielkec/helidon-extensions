@@ -43,7 +43,8 @@ class AgentsConfigSupport {
      * <p>
      * Declaring both annotation output-key forms, or using a typed key without an accessible no-argument constructor,
      * results in {@link dev.langchain4j.agentic.planner.AgenticSystemConfigurationException}. A disabled configuration
-     * or unavailable A2A provider results in {@link IllegalStateException}.
+     * or unavailable A2A provider results in {@link IllegalStateException}. Passing a {@code null} agent type results
+     * in {@link NullPointerException}.
      *
      * @param agentsConfig agent configuration
      * @param agentType agent service type
@@ -55,18 +56,8 @@ class AgentsConfigSupport {
      */
     @Prototype.PrototypeMethod
     static <T> T createA2AAgent(AgentsConfig agentsConfig, Class<T> agentType) {
+        Objects.requireNonNull(agentType, "agentType");
         return A2AAgentConfigSupport.create(agentType, agentsConfig);
-    }
-
-    /**
-     * Whether the type declares an A2A client agent method and no higher-precedence nested-agent method.
-     *
-     * @param agentType agent service type
-     * @return whether the type should use A2A client agent creation as a nested agent
-     */
-    @Prototype.PrototypeFactoryMethod
-    static boolean isA2ASubAgent(Class<?> agentType) {
-        return A2AAgentConfigSupport.isA2A(agentType);
     }
 
     /**
