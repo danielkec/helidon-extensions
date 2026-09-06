@@ -73,13 +73,16 @@ interface AgentsConfigBlueprint {
     Optional<String> description();
 
     /**
-     * URL of the remote A2A agent server.
+     * URL of the remote A2A agent server; when configured, it must be a non-blank absolute HTTP or HTTPS URI with a
+     * host, no user info or fragment, and a numeric port from 0 through 65535 when present.
      * <p>
      * When configured for an A2A client agent, this value overrides the URL declared by
      * {@code A2AClientAgent} or supplied by {@code A2AServerUrlSupplier}.
+     * These restrictions apply only to the Helidon configuration override; annotation and supplier URLs are passed
+     * unchanged to the selected A2A service.
      *
-    * @return configured A2A server URL, or empty if the annotation configuration should be used
-    */
+     * @return configured A2A server URL, or empty if the annotation configuration should be used
+     */
     @Option.Configured
     default Optional<String> a2aServerUrl() {
         return Optional.empty();

@@ -487,24 +487,29 @@ without recompiling the application:
 langchain4j:
   agents:
     remote-writer:
-      a2a-server-url: http://writer.internal:8080
+      a2a-server-url: https://writer.internal:8443
       output-key: story
       async: false
 ```
 
 Configuration takes precedence over `@A2AClientAgent` values. If
-`a2a-server-url` is not configured, Helidon retains LangChain4j's normal URL
-resolution through the annotation or an `@A2AServerUrlSupplier` method. Remote
-agents are available as top-level Helidon services and can also participate as
-subagents in declarative sequence, loop, conditional, and other composed
-workflows. A remote A2A agent does not require a local chat model.
-Configuration overrides do not mask invalid annotation declarations that set
-mutually exclusive URL or output-key sources.
+`a2a-server-url` is configured, it must be a non-blank absolute `http` or
+`https` URI with a host. It must not contain user information or a fragment,
+and any explicit port must be numeric and in the range `0` through `65535`.
+Paths and query strings are allowed. These restrictions apply only to the
+Helidon configuration override. Without an override, Helidon passes the URL
+declared by `@A2AClientAgent` or returned by `@A2AServerUrlSupplier` unchanged
+to LangChain4j's selected A2A service. Remote agents are available as top-level
+Helidon services and can also participate as subagents in declarative sequence,
+loop, conditional, and other composed workflows. A remote A2A agent does not
+require a local chat model. Configuration overrides do not mask invalid
+annotation declarations that set mutually exclusive URL or output-key sources.
 
 > [!NOTE]
-> LangChain4j applies `@A2AClientCustomizer` after it discovers the remote
-> Agent Card. The customizer therefore cannot add authentication or TLS
-> customization to that initial discovery request.
+> For HTTPS endpoints, the discovery connection must already trust the remote
+> server certificate. LangChain4j applies `@A2AClientCustomizer` after it
+> discovers the remote Agent Card, so the customizer cannot add authentication
+> or TLS customization to that initial discovery request.
 
 > [!WARNING]
 > The A2A Java SDK used by this version contains a split package across its
