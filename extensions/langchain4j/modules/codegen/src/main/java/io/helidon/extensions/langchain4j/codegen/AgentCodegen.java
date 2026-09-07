@@ -178,8 +178,8 @@ class AgentCodegen implements CodegenExtension {
                     .addContentLine("");
         });
 
-        classModel.addMethod(this::addAgentsConfigMethod);
         classModel.addMethod(this::addConfigureSubAgentsMethod);
+        classModel.addMethod(this::addAgentsConfigMethod);
         classModel.addMethod(this::addIsA2AAgentMethod);
         classModel.addMethod(this::addResolveSubAgentMethod);
 
