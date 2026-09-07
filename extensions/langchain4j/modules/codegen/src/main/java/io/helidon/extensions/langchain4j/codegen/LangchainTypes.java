@@ -76,6 +76,8 @@ final class LangchainTypes {
     static final TypeName LC_MCP_TOOL_PROVIDER = TypeName.create("dev.langchain4j.mcp.McpToolProvider");
     static final TypeName LC_MCP_CLIENT = TypeName.create("dev.langchain4j.mcp.client.McpClient");
     static final TypeName LC_AGENTIC_SERVICES = TypeName.create("dev.langchain4j.agentic.AgenticServices");
+    static final TypeName LC_A2A_CLIENT_AGENT =
+            TypeName.create("dev.langchain4j.agentic.declarative.A2AClientAgent");
     static final TypeName LC_DECLARATIVE_AGENT_CREATION_CONTEXT = TypeName.create(
             "dev.langchain4j.agentic.AgenticServices.DeclarativeAgentCreationContext");
 

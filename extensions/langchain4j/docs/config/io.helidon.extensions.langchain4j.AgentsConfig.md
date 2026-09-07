@@ -19,6 +19,17 @@ Configuration for a single LangChain4j agent
 <tbody>
 <tr>
 <td>
+<code>a2a-<wbr>server-<wbr>url</code>
+</td>
+<td>
+<code>String</code>
+</td>
+<td>
+</td>
+<td>URL of the remote A2A agent server; when configured, it must be a non-blank absolute HTTP or HTTPS URI with a host, no user info or fragment, and a numeric port from 0 through 65535 when present</td>
+</tr>
+<tr>
+<td>
 <code>chat-<wbr>model</code>
 </td>
 <td>

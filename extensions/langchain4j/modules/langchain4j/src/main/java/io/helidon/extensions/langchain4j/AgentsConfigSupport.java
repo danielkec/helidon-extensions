@@ -39,6 +39,28 @@ class AgentsConfigSupport {
     }
 
     /**
+     * Creates a configured A2A client agent.
+     * <p>
+     * Declaring both annotation output-key forms, or using a typed key without an accessible no-argument constructor,
+     * results in {@link dev.langchain4j.agentic.planner.AgenticSystemConfigurationException}. A disabled configuration
+     * or unavailable A2A provider results in {@link IllegalStateException}. Passing a {@code null} agent type results
+     * in {@link NullPointerException}.
+     *
+     * @param agentsConfig agent configuration
+     * @param agentType agent service type
+     * @param <T> agent service type
+     * @return configured A2A client agent
+     * @throws IllegalArgumentException if {@code agentType} is not an A2A client agent, its server URL sources are
+     *                                  missing or conflicting, its configured URL or output-key override is invalid, or
+     *                                  annotated method metadata is invalid
+     */
+    @Prototype.PrototypeMethod
+    static <T> T createA2AAgent(AgentsConfig agentsConfig, Class<T> agentType) {
+        Objects.requireNonNull(agentType, "agentType");
+        return A2AAgentConfigSupport.create(agentType, agentsConfig);
+    }
+
+    /**
      * Configures LangChain4j {@link dev.langchain4j.agentic.agent.AgentBuilder} from {@link AgentsConfig}.
      * <p>
      * This method resolves any configured service references (such as {@link dev.langchain4j.model.chat.ChatModel},
