@@ -29,6 +29,7 @@ import io.helidon.config.ConfigSources;
 import io.helidon.service.registry.ServiceRegistryConfig;
 import io.helidon.service.registry.ServiceRegistryManager;
 
+import dev.langchain4j.agentic.Agent;
 import dev.langchain4j.agentic.declarative.A2AClientAgent;
 import dev.langchain4j.agentic.declarative.A2AClientCustomizer;
 import dev.langchain4j.agentic.declarative.A2AServerUrlSupplier;
@@ -42,6 +43,11 @@ import dev.langchain4j.agentic.internal.AgentExecutor;
 import dev.langchain4j.agentic.internal.InternalAgent;
 import dev.langchain4j.agentic.observability.AgentListener;
 import dev.langchain4j.agentic.planner.AgenticSystemConfigurationException;
+import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.service.UserMessage;
 import dev.langchain4j.service.V;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -236,6 +242,21 @@ public class A2AAgentConfigSupportTest {
     }
 
     @Test
+    void overriddenA2AAnnotationUsesLocalAgent() {
+        var chatModel = new RecordingChatModel();
+        var manager = registryManager(Config.empty(), chatModel);
+        try {
+            var agent = manager.registry().get(OverrideShadowingAgent.class);
+
+            assertThat(agent.ask("local question"), is("local-model-response"));
+            assertThat(chatModel.invocations, is(1));
+            assertThat(recordingService.builder, is(nullValue()));
+        } finally {
+            manager.shutdown();
+        }
+    }
+
+    @Test
     void disabledNestedA2AAgentDoesNotStartDiscovery() {
         var manager = registryManager(disabledAnnotatedAgentConfig());
         try {
@@ -252,6 +273,13 @@ public class A2AAgentConfigSupportTest {
     private static ServiceRegistryManager registryManager(Config config) {
         return ServiceRegistryManager.create(ServiceRegistryConfig.builder()
                                                      .putContractInstance(Config.class, config)
+                                                     .build());
+    }
+
+    private static ServiceRegistryManager registryManager(Config config, ChatModel chatModel) {
+        return ServiceRegistryManager.create(ServiceRegistryConfig.builder()
+                                                     .putContractInstance(Config.class, config)
+                                                     .putContractInstance(ChatModel.class, chatModel)
                                                      .build());
     }
 
@@ -362,7 +390,32 @@ public class A2AAgentConfigSupportTest {
         String compose(@V("question") String question);
     }
 
+    public interface ParentA2AAgent {
+        @A2AClientAgent(a2aServerUrl = "a2a+test:shadowed-parent")
+        String ask(@V("question") String question);
+    }
+
+    @Ai.Agent("override-shadowing-agent")
+    public interface OverrideShadowingAgent extends ParentA2AAgent {
+        @Override
+        @Agent(description = "Local override", outputKey = "answer")
+        @UserMessage("{{question}}")
+        String ask(@V("question") String question);
+    }
+
     public static class TypedOutput implements TypedKey<String> {
+    }
+
+    private static final class RecordingChatModel implements ChatModel {
+        private int invocations;
+
+        @Override
+        public ChatResponse doChat(ChatRequest request) {
+            invocations++;
+            return ChatResponse.builder()
+                    .aiMessage(AiMessage.from("local-model-response"))
+                    .build();
+        }
     }
 
     private static final class RecordingA2AService implements A2AService {
