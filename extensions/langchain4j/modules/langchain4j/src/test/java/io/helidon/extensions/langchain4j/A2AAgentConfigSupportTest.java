@@ -319,11 +319,6 @@ public class A2AAgentConfigSupportTest {
 
     @Ai.Agent("annotated-a2a")
     public interface AnnotatedAgent {
-        @A2AClientAgent(a2aServerUrl = "a2a+test:annotation",
-                        outputKey = "annotation-output",
-                        async = true)
-        String ask(@V("question") String question);
-
         @A2AClientCustomizer
         static void customize(Object ignored) {
             CUSTOMIZED.set(true);
@@ -333,26 +328,31 @@ public class A2AAgentConfigSupportTest {
         static AgentListener listener() {
             return LISTENER;
         }
+
+        @A2AClientAgent(a2aServerUrl = "a2a+test:annotation",
+                        outputKey = "annotation-output",
+                        async = true)
+        String ask(@V("question") String question);
     }
 
     public interface SuppliedAgent {
-        @A2AClientAgent(typedOutputKey = TypedOutput.class)
-        String ask(@V("question") String question);
-
         @A2AServerUrlSupplier
         static String serverUrl() {
             return "urn:a2a:supplied";
         }
+
+        @A2AClientAgent(typedOutputKey = TypedOutput.class)
+        String ask(@V("question") String question);
     }
 
     public interface ConflictingAgent {
-        @A2AClientAgent(a2aServerUrl = "https://annotation.example.test/a2a")
-        String ask(@V("question") String question);
-
         @A2AServerUrlSupplier
         static String serverUrl() {
             return "https://supplier.example.test/a2a";
         }
+
+        @A2AClientAgent(a2aServerUrl = "https://annotation.example.test/a2a")
+        String ask(@V("question") String question);
     }
 
     public interface MissingUrlAgent {

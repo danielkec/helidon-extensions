@@ -28,15 +28,6 @@ public interface UnannotatedRemoteWriterAgent {
     String SERVER_URL_PROPERTY = "helidon.tests.langchain4j.a2a-server-url";
 
     /**
-     * Writes about a topic.
-     *
-     * @param topic topic to write about
-     * @return remote response
-     */
-    @A2AClientAgent(outputKey = "fallback-output")
-    String write(@V("topic") String topic);
-
-    /**
      * Supplies the loopback server URL to upstream LangChain4j.
      *
      * @return A2A server URL
@@ -45,4 +36,13 @@ public interface UnannotatedRemoteWriterAgent {
     static String serverUrl() {
         return System.getProperty(SERVER_URL_PROPERTY);
     }
+
+    /**
+     * Writes about a topic.
+     *
+     * @param topic topic to write about
+     * @return remote response
+     */
+    @A2AClientAgent(outputKey = "fallback-output")
+    String write(@V("topic") String topic);
 }
