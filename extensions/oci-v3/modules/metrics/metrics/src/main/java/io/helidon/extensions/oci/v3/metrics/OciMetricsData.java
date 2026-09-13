@@ -21,7 +21,6 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.stream.Stream;
 
 import io.helidon.metrics.api.Counter;
@@ -42,7 +41,6 @@ class OciMetricsData {
     private static final UnitConverter TIME_UNIT_CONVERTER = UnitConverter.timeUnitConverter();
     private static final List<UnitConverter> UNIT_CONVERTERS = List.of(STORAGE_UNIT_CONVERTER, TIME_UNIT_CONVERTER);
 
-    private final Set<String> scopes;
     private final OciMetricsSupport.NameFormatter nameFormatter;
     private final String compartmentId;
     private final String namespace;
@@ -50,7 +48,6 @@ class OciMetricsData {
     private final boolean descriptionEnabled;
 
     OciMetricsData(
-            Set<String> scopes,
             OciMetricsSupport.NameFormatter nameFormatter,
             String compartmentId,
             String namespace,
@@ -61,21 +58,14 @@ class OciMetricsData {
         this.namespace = namespace;
         this.resourceGroup = resourceGroup;
         this.descriptionEnabled = descriptionEnabled;
-        this.scopes = scopes;
     }
 
     List<MetricDataDetails> getMetricDataDetails() {
-        boolean hasWildcardScope = scopes.contains("*");
         List<MetricDataDetails> allMetricDataDetails = new ArrayList<>();
-        meterRegistry().meters().stream()
-                .filter(meter -> hasWildcardScope || (meter.scope().isPresent() && scopes.contains(meter.scope().get())))
-                    .flatMap(this::metricDataDetails)
-                    .forEach(allMetricDataDetails::add);
+        Services.get(MeterRegistry.class).meters().stream()
+                .flatMap(this::metricDataDetails)
+                .forEach(allMetricDataDetails::add);
         return allMetricDataDetails;
-    }
-
-    private MeterRegistry meterRegistry() {
-        return Services.get(MeterRegistry.class);
     }
 
     Stream<MetricDataDetails> metricDataDetails(Meter metric) {
@@ -95,15 +85,18 @@ class OciMetricsData {
     }
 
     private Stream<MetricDataDetails> forCounter(Meter.Id metricId, Counter counter) {
-        return Stream.of(metricDataDetails(counter, metricId, null, counter.count()));
+        double value = convertUnits(counter.baseUnit().orElse(null), counter.count());
+        return Stream.of(metricDataDetails(counter, metricId, null, value));
     }
 
     private Stream<MetricDataDetails> forFunctionalCounter(Meter.Id metricId, FunctionalCounter fCounter) {
-        return Stream.of(metricDataDetails(fCounter, metricId, null, fCounter.count()));
+        double value = convertUnits(fCounter.baseUnit().orElse(null), fCounter.count());
+        return Stream.of(metricDataDetails(fCounter, metricId, null, value));
     }
 
     private Stream<MetricDataDetails> forGauge(Meter.Id metricId, Gauge gauge) {
-        return Stream.of(metricDataDetails(gauge, metricId, null, gauge.value().doubleValue()));
+        double value = convertUnits(gauge.baseUnit().orElse(null), gauge.value().doubleValue());
+        return Stream.of(metricDataDetails(gauge, metricId, null, value));
     }
 
     private Stream<MetricDataDetails> forTimer(Meter.Id metricId, Timer timer) {
@@ -115,11 +108,11 @@ class OciMetricsData {
             result.add(metricDataDetails(timer,
                                          metricId,
                                          "mean_seconds",
-                                         snapshot.mean()));
+                                         convertUnits(Meter.BaseUnits.NANOSECONDS, snapshot.mean())));
             result.add(metricDataDetails(timer,
                                          metricId,
-                                        "max_seconds",
-                                         snapshot.max()));
+                                         "max_seconds",
+                                         convertUnits(Meter.BaseUnits.NANOSECONDS, snapshot.max())));
         }
         return result.build();
     }
@@ -136,11 +129,11 @@ class OciMetricsData {
             result.add(metricDataDetails(histogram,
                                          metricId,
                                          "mean" + unitsSuffix,
-                                         snapshot.mean()));
+                                         convertUnits(units, snapshot.mean())));
             result.add(metricDataDetails(histogram,
                                          metricId,
                                          "max" + unitsSuffix,
-                                         snapshot.max()));
+                                         convertUnits(units, snapshot.max())));
         }
         return result.build();
     }
@@ -151,24 +144,22 @@ class OciMetricsData {
             return null;
         }
 
-        Map<String, String> dimensions = dimensions(metric);
-        List<Datapoint> datapoints = datapoints(metric.description().orElse(null), value);
+        Map<String, String> dimensions = metric.id().tagsMap();
+        if (dimensions.isEmpty()) {
+            // OCI requires at least one dimension for each metric group.
+            dimensions = Map.of("source", "helidon");
+        }
+        List<Datapoint> datapoints = datapoints(value);
         String metricName = nameFormatter.format(metric, metricId, suffix, metric.baseUnit().orElse(null));
         return MetricDataDetails.builder()
                 .compartmentId(compartmentId)
                 .name(metricName)
                 .namespace(namespace)
                 .resourceGroup(resourceGroup)
-                .metadata(ociMetadata(metric.baseUnit().orElse(null)))
+                .metadata(ociMetadata(metric.description().orElse(null)))
                 .datapoints(datapoints)
                 .dimensions(dimensions)
                 .build();
-    }
-
-    private Map<String, String> dimensions(Meter metric) {
-        Map<String, String> result = metric.id().tagsMap();
-        result.put("scope", metric.scope().orElse(Meter.Scope.VENDOR));
-        return result;
     }
 
     private double convertUnits(String metricUnits, double value) {
@@ -180,9 +171,9 @@ class OciMetricsData {
         return value;
     }
 
-    private List<Datapoint> datapoints(String unit, double value) {
+    private List<Datapoint> datapoints(double value) {
         return Collections.singletonList(Datapoint.builder()
-                                                 .value(convertUnits(unit, value))
+                                                 .value(value)
                                                  .timestamp(new Date())
                                                  .build());
     }
