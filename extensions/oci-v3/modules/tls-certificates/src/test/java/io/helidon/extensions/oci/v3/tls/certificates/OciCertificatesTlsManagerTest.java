@@ -29,7 +29,7 @@ import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -60,6 +60,9 @@ import io.helidon.common.tls.Tls;
 import io.helidon.common.tls.TlsMaterial;
 import io.helidon.config.Config;
 import io.helidon.config.ConfigSources;
+import io.helidon.extensions.oci.v3.tls.certificates.TestOciCertificatesDownloader.State;
+import io.helidon.extensions.oci.v3.tls.certificates.spi.OciCertificatesDownloader;
+import io.helidon.extensions.oci.v3.tls.certificates.spi.OciPrivateKeyDownloader;
 import io.helidon.scheduling.Task;
 import io.helidon.scheduling.TaskManager;
 import io.helidon.service.registry.GlobalServiceRegistry;
@@ -70,6 +73,9 @@ import com.oracle.bmc.model.BmcException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
@@ -77,31 +83,52 @@ import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.greaterThan;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+@Isolated("Replaces the global service registry")
+@Execution(ExecutionMode.SAME_THREAD)
 class OciCertificatesTlsManagerTest {
     private static final String INACTIVE_SCHEDULE = "0 * * * * ? 2099";
     private static final String SECONDLY_SCHEDULE = "* * * * * ? *";
 
+    private ServiceRegistry originalRegistry;
+    private ServiceRegistryManager registryManager;
     private TaskManager taskManager;
-    private Set<Task> existingTasks;
+    private TestOciCertificatesDownloader downloader;
+    private TestOciPrivateKeyDownloader keyDownloader;
+    private String certificateOcid;
 
     @BeforeEach
-    void recordExistingTasks() {
-        taskManager = GlobalServiceRegistry.registry().get(TaskManager.class);
-        existingTasks = Set.copyOf(taskManager.tasks());
+    void createRegistry() {
+        originalRegistry = GlobalServiceRegistry.registry();
+        registryManager = ServiceRegistryManager.create();
+        GlobalServiceRegistry.registry(registryManager.registry());
+        taskManager = registryManager.registry().get(TaskManager.class);
+        downloader = (TestOciCertificatesDownloader) registryManager.registry().get(OciCertificatesDownloader.class);
+        keyDownloader = (TestOciPrivateKeyDownloader) registryManager.registry().get(OciPrivateKeyDownloader.class);
+        certificateOcid = "test-cert-" + UUID.randomUUID();
     }
 
     @AfterEach
-    void reset() {
-        tasksCreatedByTest().forEach(Task::close);
-        TestOciCertificatesDownloader.reset();
-        TestOciPrivateKeyDownloader.callCount = 0;
+    void closeRegistry() {
+        try {
+            if (taskManager != null) {
+                taskManager.shutdown();
+            }
+        } finally {
+            try {
+                if (registryManager != null) {
+                    registryManager.shutdown();
+                }
+            } finally {
+                GlobalServiceRegistry.registry(originalRegistry);
+            }
+        }
     }
 
     @Test
     void providerSharedManagerInitializesOnlyOnce() throws Exception {
-        String certificateOcid = "shared-test-" + System.nanoTime();
         Config config = Config.just(ConfigSources.create(Map.of(
                 "manager.oci-certificates-tls-manager.private-key-source", "certificate-bundle",
                 "manager.oci-certificates-tls-manager.schedule", INACTIVE_SCHEDULE,
@@ -113,12 +140,12 @@ class OciCertificatesTlsManagerTest {
 
         assertThat(first.prototype().manager(), sameInstance(second.prototype().manager()));
         assertThat(first.sslContext(), sameInstance(second.sslContext()));
-        assertThat(tasksCreatedByTest().size(), is(1));
-        assertThat(TestOciCertificatesDownloader.callCount_loadCertificates, is(1));
-        assertThat(TestOciCertificatesDownloader.callCount_loadCertificatesWithPrivateKey, is(1));
-        assertThat(TestOciCertificatesDownloader.callCount_loadCACertificate, is(1));
+        assertThat(taskManager.tasks().size(), is(1));
+        assertThat(downloader.publicCalls(), is(1));
+        assertThat(downloader.privateCalls(), is(1));
+        assertThat(downloader.caCalls(), is(1));
 
-        Future<Boolean> daemon = tasksCreatedByTest().getFirst().executor()
+        Future<Boolean> daemon = taskManager.tasks().iterator().next().executor()
                 .submit(() -> Thread.currentThread().isDaemon());
         assertThat("managed scheduler must not prevent JVM termination",
                    daemon.get(5, TimeUnit.SECONDS),
@@ -153,44 +180,27 @@ class OciCertificatesTlsManagerTest {
 
     @Test
     void reconstructingSharedManagerRestartsPollingAfterTaskManagerShutdown() throws Exception {
-        ServiceRegistry originalRegistry = GlobalServiceRegistry.registry();
-        ServiceRegistryManager isolatedRegistry = ServiceRegistryManager.create();
-        TaskManager isolatedTaskManager = isolatedRegistry.registry().get(TaskManager.class);
-        GlobalServiceRegistry.registry(isolatedRegistry.registry());
-        try {
-            String certificateOcid = "restart-test-" + System.nanoTime();
-            Config config = Config.just(ConfigSources.create(Map.of(
-                    "manager.oci-certificates-tls-manager.private-key-source", "certificate-bundle",
+        Config config = Config.just(ConfigSources.create(Map.of(
+                "manager.oci-certificates-tls-manager.private-key-source", "certificate-bundle",
                 "manager.oci-certificates-tls-manager.schedule", SECONDLY_SCHEDULE,
-                    "manager.oci-certificates-tls-manager.ca-ocid", "test-ca",
-                    "manager.oci-certificates-tls-manager.cert-ocid", certificateOcid)));
-            Tls first = Tls.create(config);
-            assertThat(isolatedTaskManager.tasks().size(), is(1));
-            await(() -> TestOciCertificatesDownloader.publicLoadCount(certificateOcid) >= 2,
-                  "managed polling to start");
+                "manager.oci-certificates-tls-manager.ca-ocid", "test-ca",
+                "manager.oci-certificates-tls-manager.cert-ocid", certificateOcid)));
+        Tls first = Tls.create(config);
+        assertThat(taskManager.tasks().size(), is(1));
+        Task originalTask = taskManager.tasks().iterator().next();
+        await(() -> downloader.publicCalls() >= 2, "managed polling to start");
 
-            isolatedTaskManager.shutdown();
-            TimeUnit.MILLISECONDS.sleep(100);
-            int callsAfterShutdown = TestOciCertificatesDownloader.publicLoadCount(certificateOcid);
-            TimeUnit.MILLISECONDS.sleep(1200);
+        taskManager.shutdown();
+        assertThat(taskManager.tasks().isEmpty(), is(true));
 
-            assertThat(isolatedTaskManager.tasks().isEmpty(), is(true));
-            assertThat(TestOciCertificatesDownloader.publicLoadCount(certificateOcid), is(callsAfterShutdown));
-
-            Tls second = Tls.create(config);
-            assertThat(first.prototype().manager(), sameInstance(second.prototype().manager()));
-            assertThat(first.sslContext(), sameInstance(second.sslContext()));
-            assertThat(isolatedTaskManager.tasks().size(), is(1));
-            assertThat(TestOciCertificatesDownloader.publicLoadCount(certificateOcid) > callsAfterShutdown, is(true));
-
-            int callsAfterReconstruction = TestOciCertificatesDownloader.publicLoadCount(certificateOcid);
-            await(() -> TestOciCertificatesDownloader.publicLoadCount(certificateOcid) > callsAfterReconstruction,
-                  "restarted managed polling to run");
-        } finally {
-            isolatedTaskManager.shutdown();
-            isolatedRegistry.shutdown();
-            GlobalServiceRegistry.registry(originalRegistry);
-        }
+        Tls second = Tls.create(config);
+        assertThat(first.prototype().manager(), sameInstance(second.prototype().manager()));
+        assertThat(first.sslContext(), sameInstance(second.sslContext()));
+        assertThat(taskManager.tasks().size(), is(1));
+        assertThat(taskManager.tasks().iterator().next(), not(sameInstance(originalTask)));
+        int callsAfterReconstruction = downloader.publicCalls();
+        // One old callback may finish after cancellation; two later polls require the replacement timer.
+        await(() -> downloader.publicCalls() >= callsAfterReconstruction + 2, "restarted managed polling to run");
     }
 
     @Test
@@ -199,14 +209,14 @@ class OciCertificatesTlsManagerTest {
         Tls.create(builder -> builder.manager(manager));
         Logger logger = Logger.getLogger(DefaultOciCertificatesTlsManager.class.getName());
 
-        try (TestLogHandler handler = new TestLogHandler(logger)) {
-            TestOciCertificatesDownloader.version = "2";
-            TestOciCertificatesDownloader.managedFailure =
-                    new IllegalStateException("wrapper-secret",
-                                              new BmcException(404,
-                                                               "NotAuthorizedOrNotFound",
-                                                               "sdk-secret",
-                                                               "opc-test"));
+        try (TestLogHandler handler = new TestLogHandler(logger, certificateOcid)) {
+            downloader.state(new State("2", "2", "test-keys/ca.pem",
+                                       new IllegalStateException("wrapper-secret",
+                                                                 new BmcException(404,
+                                                                                  "NotAuthorizedOrNotFound",
+                                                                                  "sdk-secret",
+                                                                                  "opc-test")),
+                                       null));
 
             await(() -> handler.records().stream().anyMatch(record -> record.getMessage()
                           .contains("phase: private-key-certificate-bundle")),
@@ -227,7 +237,7 @@ class OciCertificatesTlsManagerTest {
             assertThat(warning.getThrown(), nullValue());
             assertThat(privateKeyAlgorithm(manager), is("RSA"));
 
-            TestOciCertificatesDownloader.managedFailure = null;
+            downloader.state(new State("2", "2", "test-keys/ca.pem", null, null));
             await(() -> "EC".equals(privateKeyAlgorithm(manager)), "the failed refresh to be retried");
         }
     }
@@ -245,23 +255,25 @@ class OciCertificatesTlsManagerTest {
         assertThat(first.generation(), is(0L));
         assertThat(second.sslContext(), sameInstance(stableContext));
         assertThat(peerCertificate(cachedServerSocketFactory).getPublicKey().getAlgorithm(), is("RSA"));
-        await(() -> TestOciCertificatesDownloader.callCount_loadCertificates >= 2,
+        await(() -> downloader.publicCalls() >= 2,
               "the unchanged public bundle to be polled");
-        assertThat(TestOciCertificatesDownloader.callCount_loadCertificatesWithPrivateKey, is(1));
+        assertThat(downloader.privateCalls(), is(1));
         assertThat(stableContext.getServerSessionContext(), sameInstance(initialServerSessions));
 
-        TestOciCertificatesDownloader.caCertificateResource = "test-keys/ecCert.pem";
-        TestOciCertificatesDownloader.version = "2";
-        await(() -> "EC".equals(privateKeyAlgorithm(manager)), "the EC identity to be installed");
+        downloader.state(new State("2", "2", "test-keys/ecCert.pem", null, null));
+        await(() -> "EC".equals(privateKeyAlgorithm(manager))
+                      && "EC".equals(trustedCa(manager).getPublicKey().getAlgorithm()),
+              "the EC identity and CA to be installed");
 
-        assertThat(first.generation(), is(1L));
+        // Identity and CA are independently polled and may become visible across two complete updates.
+        assertThat(first.generation(), greaterThan(0L));
         assertThat(first.sslContext(), sameInstance(stableContext));
         assertThat(second.sslContext(), sameInstance(stableContext));
         assertThat(stableContext.getServerSessionContext(), not(sameInstance(initialServerSessions)));
         assertThat(stableContext.getClientSessionContext(), not(sameInstance(initialClientSessions)));
         assertThat(peerCertificate(cachedServerSocketFactory).getPublicKey().getAlgorithm(), is("EC"));
         assertThat(trustedCa(manager).getPublicKey().getAlgorithm(), is("EC"));
-        assertThat(TestOciCertificatesDownloader.callCount_loadCertificatesWithPrivateKey, is(2));
+        assertThat(downloader.privateCalls(), is(2));
     }
 
     @Test
@@ -269,19 +281,20 @@ class OciCertificatesTlsManagerTest {
         OciCertificatesTlsManager manager = newManager(false, SECONDLY_SCHEDULE);
         Tls tls = Tls.create(builder -> builder.manager(manager));
         SSLSessionContext initialSessions = tls.sslContext().getServerSessionContext();
+        Logger logger = Logger.getLogger(DefaultOciCertificatesTlsManager.class.getName());
+        try (TestLogHandler handler = new TestLogHandler(logger, certificateOcid)) {
+            downloader.state(new State("2", "3", "test-keys/ca.pem", null, null));
+            await(() -> handler.records().stream().anyMatch(record -> record.getMessage()
+                          .contains("phase: identity-version-validation")),
+                  "the raced private bundle to be rejected");
+            assertThat(privateKeyAlgorithm(manager), is("RSA"));
+            assertThat(tls.generation(), is(0L));
+            assertThat(tls.sslContext().getServerSessionContext(), sameInstance(initialSessions));
 
-        TestOciCertificatesDownloader.caCertificateResource = "test-keys/ecCert.pem";
-        TestOciCertificatesDownloader.privateVersion = "3";
-        TestOciCertificatesDownloader.version = "2";
-        await(() -> TestOciCertificatesDownloader.callCount_loadCertificatesWithPrivateKey >= 2,
-              "a raced private bundle to be rejected");
-
-        assertThat(privateKeyAlgorithm(manager), is("RSA"));
-        assertThat(tls.sslContext().getServerSessionContext(), sameInstance(initialSessions));
-
-        TestOciCertificatesDownloader.privateVersion = null;
-        await(() -> "EC".equals(privateKeyAlgorithm(manager)), "the stable candidate to be retried");
-        assertThat(tls.sslContext().getServerSessionContext(), not(sameInstance(initialSessions)));
+            downloader.state(new State("2", "2", "test-keys/ca.pem", null, null));
+            await(() -> "EC".equals(privateKeyAlgorithm(manager)), "the stable candidate to be retried");
+            assertThat(tls.sslContext().getServerSessionContext(), not(sameInstance(initialSessions)));
+        }
     }
 
     @Test
@@ -293,14 +306,14 @@ class OciCertificatesTlsManagerTest {
         await(() -> tls.sslContext().getServerSessionContext() != initialSessions,
               "an explicitly requested reload");
 
-        assertThat(TestOciCertificatesDownloader.callCount_loadCertificates >= 2, is(true));
-        assertThat(TestOciCertificatesDownloader.callCount_loadCertificatesWithPrivateKey, is(1));
+        assertThat(downloader.publicCalls() >= 2, is(true));
+        assertThat(downloader.privateCalls(), is(1));
         assertThat(privateKeyAlgorithm(manager), is("RSA"));
     }
 
     @Test
     void caRotationRejectsPreviouslyResumableMutualTlsSession() throws Exception {
-        TestOciCertificatesDownloader.caCertificateResource = "test-keys/ecCert.pem";
+        downloader.state(new State("1", "1", "test-keys/ecCert.pem", null, null));
         OciCertificatesTlsManager manager = newManager(false, SECONDLY_SCHEDULE);
         Tls tls = Tls.create(builder -> builder.manager(manager));
         SSLSocketFactory clientFactory = mutualTlsClientFactory();
@@ -314,11 +327,11 @@ class OciCertificatesTlsManagerTest {
             byte[] resumed = mutualTlsHandshake(listener, clientFactory);
             assertThat("the pre-rotation TLS 1.2 session should be resumable", Arrays.equals(first, resumed), is(true));
 
-            TestOciCertificatesDownloader.caCertificateResource = "test-keys/serverCert.pem";
+            downloader.state(new State("1", "1", "test-keys/serverCert.pem", null, null));
             await(() -> "RSA".equals(trustedCa(manager).getPublicKey().getAlgorithm()),
                   "the replacement trust anchor to be installed");
             assertThrows(SSLHandshakeException.class, () -> mutualTlsHandshake(listener, clientFactory));
-            assertThat(TestOciCertificatesDownloader.callCount_loadCertificatesWithPrivateKey, is(1));
+            assertThat(downloader.privateCalls(), is(1));
         }
     }
 
@@ -326,10 +339,9 @@ class OciCertificatesTlsManagerTest {
     void vaultDefaultsToReloadingUnchangedIdentity() throws Exception {
         OciCertificatesTlsManager manager = newVaultManager(null);
         Tls tls = Tls.create(builder -> builder.manager(manager));
-        assertThat(TestOciPrivateKeyDownloader.callCount, is(1));
         await(() -> tls.generation() > 0, "the default Vault refresh");
-        assertThat(TestOciPrivateKeyDownloader.callCount >= 2, is(true));
-        assertThat(TestOciCertificatesDownloader.callCount_loadCertificatesWithPrivateKey, is(0));
+        assertThat(keyDownloader.calls() >= 2, is(true));
+        assertThat(downloader.privateCalls(), is(0));
         assertThat(privateKeyAlgorithm(manager), is("RSA"));
     }
 
@@ -337,14 +349,14 @@ class OciCertificatesTlsManagerTest {
     void vaultCanSkipUnchangedIdentityAndRotateCaIndependently() throws Exception {
         OciCertificatesTlsManager manager = newVaultManager(false);
         Tls tls = Tls.create(builder -> builder.manager(manager));
-        await(() -> TestOciCertificatesDownloader.callCount_loadCACertificate >= 2, "unchanged Vault polling");
+        await(() -> downloader.caCalls() >= 2, "unchanged Vault polling");
         assertThat(tls.generation(), is(0L));
-        assertThat(TestOciPrivateKeyDownloader.callCount, is(1));
-        TestOciCertificatesDownloader.caCertificateResource = "test-keys/ecCert.pem";
+        assertThat(keyDownloader.calls(), is(1));
+        downloader.state(new State("1", "1", "test-keys/ecCert.pem", null, null));
         await(() -> tls.generation() == 1, "CA-only Vault rotation");
         assertThat(trustedCa(manager).getPublicKey().getAlgorithm(), is("EC"));
-        assertThat(TestOciPrivateKeyDownloader.callCount, is(2));
-        assertThat(TestOciCertificatesDownloader.callCount_loadCertificatesWithPrivateKey, is(0));
+        assertThat(keyDownloader.calls(), is(2));
+        assertThat(downloader.privateCalls(), is(0));
     }
 
     @Test
@@ -353,9 +365,9 @@ class OciCertificatesTlsManagerTest {
         Tls tls = Tls.create(builder -> builder.manager(manager));
         SSLSessionContext initialSessions = tls.sslContext().getServerSessionContext();
         Logger logger = Logger.getLogger(DefaultOciCertificatesTlsManager.class.getName());
-        try (TestLogHandler handler = new TestLogHandler(logger)) {
-            TestOciCertificatesDownloader.caFailure = new IllegalStateException("secret CA detail");
-            TestOciCertificatesDownloader.caCertificateResource = "test-keys/ecCert.pem";
+        try (TestLogHandler handler = new TestLogHandler(logger, certificateOcid)) {
+            downloader.state(new State("1", "1", "test-keys/ecCert.pem", null,
+                                       new IllegalStateException("secret CA detail")));
             await(() -> !handler.records().isEmpty(), "failed CA poll");
             LogRecord warning = handler.records().getFirst();
             assertThat(warning.getMessage(), containsString("failure category: oci-download-or-tls-state"));
@@ -363,10 +375,10 @@ class OciCertificatesTlsManagerTest {
             assertThat(warning.getThrown(), nullValue());
             assertThat(tls.generation(), is(0L));
             assertThat(tls.sslContext().getServerSessionContext(), sameInstance(initialSessions));
-            TestOciCertificatesDownloader.caFailure = null;
+            downloader.state(new State("1", "1", "test-keys/ecCert.pem", null, null));
             await(() -> tls.generation() == 1, "CA retry");
             assertThat(trustedCa(manager).getPublicKey().getAlgorithm(), is("EC"));
-            assertThat(TestOciCertificatesDownloader.callCount_loadCertificatesWithPrivateKey, is(1));
+            assertThat(downloader.privateCalls(), is(1));
         }
     }
 
@@ -389,8 +401,8 @@ class OciCertificatesTlsManagerTest {
         } finally {
             executor.shutdownNow();
         }
-        assertThat(tasksCreatedByTest().size(), is(1));
-        assertThat(TestOciCertificatesDownloader.callCount_loadCertificatesWithPrivateKey, is(1));
+        assertThat(taskManager.tasks().size(), is(1));
+        assertThat(downloader.privateCalls(), is(1));
         assertThat(manager.generation(), is(0L));
     }
 
@@ -400,15 +412,16 @@ class OciCertificatesTlsManagerTest {
         Tls tls = Tls.create(builder -> builder.manager(manager));
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        TestOciCertificatesDownloader.privateLoadEntered = entered;
-        TestOciCertificatesDownloader.privateLoadRelease = release;
+        downloader.blockPrivateDownload(entered, release);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            TestOciCertificatesDownloader.version = "2";
+            downloader.state(new State("2", "2", "test-keys/ca.pem", null, null));
             assertThat(entered.await(5, TimeUnit.SECONDS), is(true));
             Future<Long> generation = executor.submit(tls::generation);
             assertThat("current TLS material remains available during OCI I/O",
-                       generation.get(1, TimeUnit.SECONDS), is(0L));
+                       generation.get(10, TimeUnit.SECONDS), is(0L));
+            assertThat("the generation read completed before the download was released",
+                       downloader.privateDownloadWaiting(), is(true));
             assertThat(privateKeyAlgorithm(manager), is("RSA"));
         } finally {
             release.countDown();
@@ -427,34 +440,10 @@ class OciCertificatesTlsManagerTest {
             listener.setEnabledProtocols(new String[] {"TLSv1.2"});
             listener.setSoTimeout(5000);
             assertThat(peerCertificate(listener).getPublicKey().getAlgorithm(), is("RSA"));
-            TestOciCertificatesDownloader.version = "2";
+            downloader.state(new State("2", "2", "test-keys/ca.pem", null, null));
             await(() -> tls.generation() == 1, "identity rotation with listener open");
             assertThat(peerCertificate(listener).getPublicKey().getAlgorithm(), is("EC"));
         }
-    }
-
-    private static OciCertificatesTlsManager newVaultManager(Boolean alwaysReload) {
-        OciCertificatesTlsManagerConfig.Builder builder = OciCertificatesTlsManagerConfig.builder()
-                .schedule(SECONDLY_SCHEDULE)
-                .caOcid("test-ca")
-                .certOcid("test-cert")
-                .vaultCryptoEndpoint(URI.create("https://vault.example.test"))
-                .keyOcid("test-key")
-                .keyPassword("test-password");
-        if (alwaysReload != null) {
-            builder.alwaysReload(alwaysReload);
-        }
-        return builder.build();
-    }
-
-    private static OciCertificatesTlsManager newManager(boolean alwaysReload, String schedule) {
-        return OciCertificatesTlsManager.create(OciCertificatesTlsManagerConfig.builder()
-                                                             .schedule(schedule)
-                                                             .privateKeySource(OciPrivateKeySource.CERTIFICATE_BUNDLE)
-                                                             .alwaysReload(alwaysReload)
-                                                             .caOcid("test-ca")
-                                                             .certOcid("test-cert")
-                                                             .buildPrototype());
     }
 
     private static String privateKeyAlgorithm(OciCertificatesTlsManager manager) {
@@ -609,25 +598,46 @@ class OciCertificatesTlsManagerTest {
         assertThat("Timed out waiting for " + description, condition.getAsBoolean(), is(true));
     }
 
-    private List<Task> tasksCreatedByTest() {
-        return taskManager.tasks()
-                .stream()
-                .filter(task -> !existingTasks.contains(task))
-                .toList();
+    private OciCertificatesTlsManager newVaultManager(Boolean alwaysReload) {
+        OciCertificatesTlsManagerConfig.Builder builder = OciCertificatesTlsManagerConfig.builder()
+                .schedule(SECONDLY_SCHEDULE)
+                .caOcid("test-ca")
+                .certOcid(certificateOcid)
+                .vaultCryptoEndpoint(URI.create("https://vault.example.test"))
+                .keyOcid("test-key")
+                .keyPassword("test-password");
+        if (alwaysReload != null) {
+            builder.alwaysReload(alwaysReload);
+        }
+        return builder.build();
+    }
+
+    private OciCertificatesTlsManager newManager(boolean alwaysReload, String schedule) {
+        return OciCertificatesTlsManager.create(OciCertificatesTlsManagerConfig.builder()
+                                                             .schedule(schedule)
+                                                             .privateKeySource(OciPrivateKeySource.CERTIFICATE_BUNDLE)
+                                                             .alwaysReload(alwaysReload)
+                                                             .caOcid("test-ca")
+                                                             .certOcid(certificateOcid)
+                                                             .buildPrototype());
     }
 
     private static final class TestLogHandler extends Handler implements AutoCloseable {
         private final List<LogRecord> records = new CopyOnWriteArrayList<>();
         private final Logger logger;
+        private final String certificatePrefix;
 
-        private TestLogHandler(Logger logger) {
+        private TestLogHandler(Logger logger, String certificateOcid) {
             this.logger = logger;
+            this.certificatePrefix = "Failed to refresh OCI certificate " + certificateOcid + " (";
             logger.addHandler(this);
         }
 
         @Override
         public void publish(LogRecord record) {
-            records.add(record);
+            if (record.getMessage().startsWith(certificatePrefix)) {
+                records.add(record);
+            }
         }
 
         @Override

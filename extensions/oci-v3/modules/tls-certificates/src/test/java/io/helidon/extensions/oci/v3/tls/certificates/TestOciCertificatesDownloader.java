@@ -23,9 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -42,127 +40,115 @@ import io.helidon.service.registry.Service;
 @Service.Singleton
 @Weight(Weighted.DEFAULT_WEIGHT + 1)
 class TestOciCertificatesDownloader implements OciCertificatesDownloader {
-    private static final Map<String, AtomicInteger> PUBLIC_LOADS_BY_OCID = new ConcurrentHashMap<>();
+    private final AtomicInteger publicCalls = new AtomicInteger();
+    private final AtomicInteger privateCalls = new AtomicInteger();
+    private final AtomicInteger caCalls = new AtomicInteger();
 
-    static volatile String version = "1";
-    static volatile String privateVersion;
-    static volatile String caCertificateResource = "test-keys/ca.pem";
-
-    static volatile int callCount_loadCertificates;
-    static volatile int callCount_loadCertificatesWithPrivateKey;
-    static volatile int callCount_loadCACertificate;
-    static volatile RuntimeException managedFailure;
-    static volatile RuntimeException caFailure;
-    static volatile CountDownLatch privateLoadEntered;
-    static volatile CountDownLatch privateLoadRelease;
-
-    static void reset() {
-        privateLoadEntered = null;
-        privateLoadRelease = null;
-        version = "1";
-        privateVersion = null;
-        caCertificateResource = "test-keys/ca.pem";
-        callCount_loadCertificates = 0;
-        callCount_loadCertificatesWithPrivateKey = 0;
-        callCount_loadCACertificate = 0;
-        managedFailure = null;
-        caFailure = null;
-        PUBLIC_LOADS_BY_OCID.clear();
-    }
-
-    static int publicLoadCount(String certOcid) {
-        AtomicInteger counter = PUBLIC_LOADS_BY_OCID.get(certOcid);
-        return counter == null ? 0 : counter.get();
-    }
+    private volatile State state = new State("1", "1", "test-keys/ca.pem", null, null);
+    private volatile PrivateDownloadGate privateDownloadGate;
+    private volatile boolean privateDownloadWaiting;
 
     @Override
     public Certificates loadCertificates(String certOcid) {
-        callCount_loadCertificates++;
-        PUBLIC_LOADS_BY_OCID.computeIfAbsent(certOcid, key -> new AtomicInteger()).incrementAndGet();
-
-        try {
-            TimeUnit.MILLISECONDS.sleep(1); // make sure metrics timestamp changes
-            Objects.requireNonNull(certOcid);
-            String resource = "2".equals(version) ? "test-keys/ecCert.pem" : "test-keys/serverCert.pem";
-            try (InputStream certIs =
-                    TestOciCertificatesDownloader.class.getClassLoader().getResourceAsStream(resource)) {
-                X509Certificate certificate = toCertificate(certIs);
-                return OciCertificatesDownloader.create(version, new X509Certificate[] {certificate});
-            } catch (Exception e) {
-                throw new IllegalStateException(e);
-            }
-        } catch (InterruptedException e) {
-            System.getLogger(getClass().getName()).log(System.Logger.Level.ERROR, e.getMessage(), e);
-            throw new IllegalStateException(e);
+        State currentState = state;
+        publicCalls.incrementAndGet();
+        Objects.requireNonNull(certOcid);
+        String resource = "2".equals(currentState.version()) ? "test-keys/ecCert.pem" : "test-keys/serverCert.pem";
+        try (InputStream certIs =
+                TestOciCertificatesDownloader.class.getClassLoader().getResourceAsStream(resource)) {
+            X509Certificate certificate = toCertificate(certIs);
+            return OciCertificatesDownloader.create(currentState.version(), new X509Certificate[] {certificate});
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
     @Override
     public CertificatesWithPrivateKey loadCertificatesWithPrivateKey(String certOcid) {
-        callCount_loadCertificatesWithPrivateKey++;
-
-        try {
-            CountDownLatch entered = privateLoadEntered;
-            CountDownLatch release = privateLoadRelease;
-            if (entered != null && release != null) {
-                entered.countDown();
-                if (!release.await(5, TimeUnit.SECONDS)) {
+        State currentState = state;
+        PrivateDownloadGate gate = privateDownloadGate;
+        privateCalls.incrementAndGet();
+        Objects.requireNonNull(certOcid);
+        if (gate != null) {
+            privateDownloadWaiting = true;
+            try {
+                gate.entered().countDown();
+                if (!gate.release().await(30, TimeUnit.SECONDS)) {
                     throw new IllegalStateException("Timed out waiting for test download release");
                 }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            } finally {
+                privateDownloadWaiting = false;
             }
-            Objects.requireNonNull(certOcid);
-            if (managedFailure != null) {
-                throw managedFailure;
-            }
+        }
+        if (currentState.managedFailure() != null) {
+            throw currentState.managedFailure();
+        }
 
-            ClassLoader classLoader = TestOciCertificatesDownloader.class.getClassLoader();
-            String certificateResource = "2".equals(version) ? "test-keys/ecCert.pem" : "test-keys/serverCert.pem";
-            String keyResource = "2".equals(version) ? "test-keys/ecKey.pem" : "test-keys/serverKey.pem";
-            try (InputStream certIs = classLoader.getResourceAsStream(certificateResource);
-                    InputStream keyIs = classLoader.getResourceAsStream(keyResource)) {
-                X509Certificate certificate = toCertificate(certIs);
-                String keyPem = new String(Objects.requireNonNull(keyIs).readAllBytes(), StandardCharsets.US_ASCII);
-                PemKeys pemKeys = PemKeys.builder()
-                        .key(Resource.create("test private key", keyPem))
-                        .build();
-                PrivateKey privateKey = Keys.builder()
-                        .pem(pemKeys)
-                        .build()
-                        .privateKey()
-                        .orElseThrow();
-                return OciCertificatesDownloader.create(privateVersion == null ? version : privateVersion,
-                                                        new X509Certificate[] {certificate},
-                                                        privateKey);
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(e);
+        ClassLoader classLoader = TestOciCertificatesDownloader.class.getClassLoader();
+        String certificateResource = "2".equals(currentState.version()) ? "test-keys/ecCert.pem" : "test-keys/serverCert.pem";
+        String keyResource = "2".equals(currentState.version()) ? "test-keys/ecKey.pem" : "test-keys/serverKey.pem";
+        try (InputStream certIs = classLoader.getResourceAsStream(certificateResource);
+                InputStream keyIs = classLoader.getResourceAsStream(keyResource)) {
+            X509Certificate certificate = toCertificate(certIs);
+            String keyPem = new String(Objects.requireNonNull(keyIs).readAllBytes(), StandardCharsets.US_ASCII);
+            PemKeys pemKeys = PemKeys.builder()
+                    .key(Resource.create("test private key", keyPem))
+                    .build();
+            PrivateKey privateKey = Keys.builder()
+                    .pem(pemKeys)
+                    .build()
+                    .privateKey()
+                    .orElseThrow();
+            return OciCertificatesDownloader.create(currentState.privateVersion(),
+                                                    new X509Certificate[] {certificate},
+                                                    privateKey);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
     @Override
     public X509Certificate loadCACertificate(String caCertOcid) {
-        callCount_loadCACertificate++;
-        if (caFailure != null) {
-            throw caFailure;
+        State currentState = state;
+        caCalls.incrementAndGet();
+        Objects.requireNonNull(caCertOcid);
+        if (currentState.caFailure() != null) {
+            throw currentState.caFailure();
         }
-        String certificateResource = caCertificateResource;
 
-        try {
-            TimeUnit.MILLISECONDS.sleep(1); // make sure metrics timestamp changes
-            Objects.requireNonNull(caCertOcid);
-            try (InputStream caCertIs =
-                    TestOciCertificatesDownloader.class.getClassLoader().getResourceAsStream(certificateResource)) {
-                return toCertificate(caCertIs);
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-        } catch (InterruptedException e) {
-            System.getLogger(getClass().getName()).log(System.Logger.Level.ERROR, e.getMessage(), e);
-            throw new IllegalStateException(e);
+        try (InputStream caCertIs =
+                TestOciCertificatesDownloader.class.getClassLoader().getResourceAsStream(currentState.caResource())) {
+            return toCertificate(caCertIs);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
+    }
+
+    int publicCalls() {
+        return publicCalls.get();
+    }
+
+    int privateCalls() {
+        return privateCalls.get();
+    }
+
+    int caCalls() {
+        return caCalls.get();
+    }
+
+    void state(State state) {
+        this.state = Objects.requireNonNull(state);
+    }
+
+    void blockPrivateDownload(CountDownLatch entered, CountDownLatch release) {
+        privateDownloadGate = new PrivateDownloadGate(Objects.requireNonNull(entered), Objects.requireNonNull(release));
+    }
+
+    boolean privateDownloadWaiting() {
+        return privateDownloadWaiting;
     }
 
     private static X509Certificate toCertificate(InputStream inputStream) {
@@ -173,4 +159,13 @@ class TestOciCertificatesDownloader implements OciCertificatesDownloader {
         return certificates.getFirst();
     }
 
+    record State(String version,
+                 String privateVersion,
+                 String caResource,
+                 RuntimeException managedFailure,
+                 RuntimeException caFailure) {
+    }
+
+    private record PrivateDownloadGate(CountDownLatch entered, CountDownLatch release) {
+    }
 }
