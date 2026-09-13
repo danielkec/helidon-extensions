@@ -34,7 +34,6 @@
 
     <properties>
         <mainClass>io.helidon.extensions.oci.v3.tests.tls.certificates.NativeImageMain</mainClass>
-        <helidon.extension.oci.v3.version>27.0.0-SNAPSHOT</helidon.extension.oci.v3.version>
         <version.lib.oci>3.78.1</version.lib.oci>
         <maven.deploy.skip>true</maven.deploy.skip>
         <maven.sources.skip>true</maven.sources.skip>
@@ -53,7 +52,7 @@
             <dependency>
                 <groupId>io.helidon.extensions.oci.v3</groupId>
                 <artifactId>helidon-extensions-oci-v3-bom</artifactId>
-                <version>${helidon.extension.oci.v3.version}</version>
+                <version>${project.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
