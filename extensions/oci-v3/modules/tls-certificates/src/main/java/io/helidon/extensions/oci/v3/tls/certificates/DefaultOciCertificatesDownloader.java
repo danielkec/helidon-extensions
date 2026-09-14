@@ -88,14 +88,6 @@ class DefaultOciCertificatesDownloader implements OciCertificatesDownloader {
         }
     }
 
-    private static X509Certificate[] toCertificates(InputStream chainIs,
-                                                    InputStream certIs) {
-        ArrayList<X509Certificate> chain = new ArrayList<>();
-        chain.addAll(PemReader.readCertificates(certIs));
-        chain.addAll(PemReader.readCertificates(chainIs));
-        return chain.toArray(new X509Certificate[0]);
-    }
-
     private static X509Certificate toCertificate(InputStream certIs) {
         List<X509Certificate> certs = PemReader.readCertificates(certIs);
         if (certs.size() != 1) {
@@ -215,11 +207,9 @@ class DefaultOciCertificatesDownloader implements OciCertificatesDownloader {
                                                                 GetCertificateBundleRequest.CertificateBundleType
                                                                         .CertificateContentPublicOnly)
                                                         .build());
-            ByteArrayInputStream chainIs = new ByteArrayInputStream(res.getCertificateBundle().getCertChainPem()
-                                                                            .getBytes(StandardCharsets.US_ASCII));
-            ByteArrayInputStream certIs = new ByteArrayInputStream(res.getCertificateBundle().getCertificatePem()
-                                                                           .getBytes(StandardCharsets.US_ASCII));
-            X509Certificate[] certs = toCertificates(chainIs, certIs);
+            String certificatePem = res.getCertificateBundle().getCertificatePem();
+            String certChainPem = res.getCertificateBundle().getCertChainPem();
+            X509Certificate[] certs = parseCertificates(certificatePem, certChainPem == null ? "" : certChainPem);
             String version = toVersion(res.getCertificateBundle().getVersionNumber(), res.getEtag(), certs);
             return create(version, certs);
         }

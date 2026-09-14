@@ -103,6 +103,49 @@ class DefaultOciCertificatesDownloaderTest {
     }
 
     @Test
+    void decodesPublicBundleWithNullCertificateChain() {
+        CertificateBundlePublicOnly bundle = CertificateBundlePublicOnly.builder()
+                .versionNumber(42L)
+                .certificatePem(resource("serverCert.pem"))
+                .certChainPem(null)
+                .build();
+
+        Certificates result = loadPublicBundle(bundle, "public-etag");
+
+        assertThat(result.version(), is("42"));
+        assertThat(result.certificates(), is(new X509Certificate[] {certificate("serverCert.pem")}));
+    }
+
+    @Test
+    void decodesPublicBundleWithEmptyCertificateChain() {
+        CertificateBundlePublicOnly bundle = CertificateBundlePublicOnly.builder()
+                .versionNumber(42L)
+                .certificatePem(resource("serverCert.pem"))
+                .certChainPem("")
+                .build();
+
+        Certificates result = loadPublicBundle(bundle, "public-etag");
+
+        assertThat(result.version(), is("42"));
+        assertThat(result.certificates(), is(new X509Certificate[] {certificate("serverCert.pem")}));
+    }
+
+    @Test
+    void decodesPublicBundleWithOmittedCertificateChain() throws IOException {
+        String response = "{\"certificateBundleType\":\"CERTIFICATE_CONTENT_PUBLIC_ONLY\","
+                + "\"versionNumber\":42,\"certificatePem\":" + jsonValue(resource("serverCert.pem")) + "}";
+        try (BundleResponseServer server = new BundleResponseServer(response, "public-etag")) {
+            DefaultOciCertificatesDownloader downloader =
+                    new DefaultOciCertificatesDownloader(new LocalAuthProvider(server.endpoint()));
+
+            Certificates result = downloader.loadCertificates("certificate-ocid");
+
+            assertThat(result.version(), is("42"));
+            assertThat(result.certificates(), is(new X509Certificate[] {certificate("serverCert.pem")}));
+        }
+    }
+
+    @Test
     void createsEndpointForIpv6Literal() throws IOException {
         URI endpoint = BundleResponseServer.endpoint(InetAddress.getByName("::1"), 8443);
 
@@ -158,6 +201,8 @@ class DefaultOciCertificatesDownloaderTest {
 
         assertThat(publicCertificates.version(), is(privateCertificates.version()));
         assertThat(publicCertificates.version(), is("42"));
+        assertThat(publicCertificates.certificates(),
+                   is(new X509Certificate[] {certificate("serverCert.pem"), certificate("ca.pem")}));
     }
 
     @Test
