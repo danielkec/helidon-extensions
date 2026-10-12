@@ -492,19 +492,15 @@ final class PulsarIncomingChannel {
 
         private RuntimeException closeOwnedResources(boolean force) {
             resourceCloseLock.lock();
+            boolean interrupted = Thread.interrupted();
             try {
                 PulsarClient client = activeClient.get();
                 Consumer<Object> consumer = activeConsumer.get();
                 if (client == null && consumer == null) {
                     return null;
                 }
-                if (force) {
-                    RuntimeException failure = shutdown(client);
-                    if (failure == null) {
-                        activeClient.compareAndSet(client, null);
-                        activeConsumer.compareAndSet(consumer, null);
-                    }
-                    return failure;
+                if (force || forceCloseRequested.get()) {
+                    return shutdownOwnedResources(client, consumer);
                 }
                 long deadline = closeDeadline();
                 RuntimeException failure = null;
@@ -522,7 +518,12 @@ final class PulsarIncomingChannel {
                                                new MessagingException(
                                                        "Cannot initiate Pulsar consumer close for channel "
                                                                + config.channelName(), e));
+                    } finally {
+                        interrupted |= Thread.interrupted();
                     }
+                }
+                if (forceCloseRequested.get()) {
+                    return mergeFailure(failure, shutdownOwnedResources(client, consumer));
                 }
                 boolean clientClosed = client == null;
                 if (client != null) {
@@ -534,7 +535,12 @@ final class PulsarIncomingChannel {
                         failure = mergeFailure(failure,
                                                new MessagingException("Cannot initiate Pulsar client close for channel "
                                                                               + config.channelName(), e));
+                    } finally {
+                        interrupted |= Thread.interrupted();
                     }
+                }
+                if (forceCloseRequested.get()) {
+                    return mergeFailure(failure, shutdownOwnedResources(client, consumer));
                 }
                 if (clientClosed) {
                     activeClient.compareAndSet(client, null);
@@ -554,21 +560,43 @@ final class PulsarIncomingChannel {
                 return failure;
             } finally {
                 resourceCloseLock.unlock();
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
+        }
+
+        private RuntimeException shutdownOwnedResources(PulsarClient client, Consumer<Object> consumer) {
+            RuntimeException failure = shutdown(client);
+            if (failure == null) {
+                activeClient.compareAndSet(client, null);
+                activeConsumer.compareAndSet(consumer, null);
+            }
+            return failure;
         }
 
         private RuntimeException awaitClose(CompletableFuture<Void> closeFuture,
                                             long deadline,
                                             String resource,
                                             RuntimeException primary) {
+            boolean interrupted = false;
             try {
-                long remaining = remainingNanos(deadline);
-                closeFuture.get(remaining, TimeUnit.NANOSECONDS);
-                return primary;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return mergeFailure(primary,
-                                    new MessagingException("Pulsar " + resource + " close was interrupted", e));
+                while (true) {
+                    // The caller switches to shutdown before treating an abandoned wait as a successful close.
+                    if (forceCloseRequested.get() && !closeFuture.isDone()) {
+                        return primary;
+                    }
+                    try {
+                        closeFuture.get(remainingNanos(deadline), TimeUnit.NANOSECONDS);
+                        return primary;
+                    } catch (InterruptedException _) {
+                        // Graceful stop requests must not abort resource cleanup or extend its deadline.
+                        interrupted = true;
+                        if (!forceCloseRequested.get() && remainingNanos(deadline) == 0 && !closeFuture.isDone()) {
+                            throw new TimeoutException();
+                        }
+                    }
+                }
             } catch (ExecutionException e) {
                 Throwable cause = e.getCause() == null ? e : e.getCause();
                 return mergeFailure(primary,
@@ -578,6 +606,10 @@ final class PulsarIncomingChannel {
                 return mergeFailure(primary,
                                     new MessagingException("Timed out closing Pulsar " + resource + " for channel "
                                                                    + config.channelName(), e));
+            } finally {
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
 
