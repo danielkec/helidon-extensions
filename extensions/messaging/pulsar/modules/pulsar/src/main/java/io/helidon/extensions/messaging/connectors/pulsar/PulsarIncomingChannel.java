@@ -491,9 +491,10 @@ final class PulsarIncomingChannel {
         }
 
         private RuntimeException closeOwnedResources(boolean force) {
+            boolean interrupted = false;
             resourceCloseLock.lock();
-            boolean interrupted = Thread.interrupted();
             try {
+                interrupted = Thread.interrupted();
                 PulsarClient client = activeClient.get();
                 Consumer<Object> consumer = activeConsumer.get();
                 if (client == null && consumer == null) {
