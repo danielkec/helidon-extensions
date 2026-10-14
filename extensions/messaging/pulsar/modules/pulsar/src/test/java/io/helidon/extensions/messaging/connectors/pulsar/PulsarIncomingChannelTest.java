@@ -24,6 +24,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -57,6 +58,132 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class PulsarIncomingChannelTest {
     private static final Duration WAIT = Duration.ofSeconds(5);
+
+    @Test
+    void forceCloseEscalatesPendingConsumerClose() throws Exception {
+        forceCloseDuringCleanup(true, null);
+    }
+
+    @Test
+    void forceCloseEscalatesPendingClientClose() throws Exception {
+        forceCloseDuringCleanup(false, null);
+    }
+
+    @Test
+    void forceCloseRetainsEarlierConsumerCloseFailure() throws Exception {
+        forceCloseDuringCleanup(false, new IllegalStateException("consumer close failed before force close"));
+    }
+
+    @Test
+    void repeatedDrainWaitsForConsumerAndClientCloseDespiteInterrupts() throws Exception {
+        TestContext context = new TestContext(false);
+        CompletableFuture<Void> consumerClose = new CompletableFuture<>();
+        CompletableFuture<Void> clientClose = new CompletableFuture<>();
+        FakeSource source = new FakeSource(null, context.reserved, consumerClose, clientClose);
+        source.blockReceive.set(true);
+        IncomingChannel connector = new PulsarIncomingChannel(_ -> source.client())
+                .createIncomingChannel(commonConfig(), config(1024));
+        AtomicReference<Throwable> runFailure = new AtomicReference<>();
+        CompletableFuture<Boolean> completion = new CompletableFuture<>();
+        Thread owner = Thread.ofVirtual().start(() -> {
+            run(connector, context, runFailure);
+            completion.complete(Thread.currentThread().isInterrupted());
+        });
+
+        try {
+            assertThat(source.receiveEntered.await(WAIT.toMillis(), TimeUnit.MILLISECONDS), is(true));
+            connector.drain();
+            assertThat(source.consumerCloseEntered.await(WAIT.toMillis(), TimeUnit.MILLISECONDS), is(true));
+            connector.drain();
+            assertThrows(TimeoutException.class, () -> completion.get(100, TimeUnit.MILLISECONDS));
+            assertThat(source.clientCloseCalls.get(), is(0));
+
+            consumerClose.complete(null);
+            assertThat(source.clientCloseEntered.await(WAIT.toMillis(), TimeUnit.MILLISECONDS), is(true));
+            connector.drain();
+            assertThrows(TimeoutException.class, () -> completion.get(100, TimeUnit.MILLISECONDS));
+
+            clientClose.complete(null);
+            assertThat(completion.get(WAIT.toMillis(), TimeUnit.MILLISECONDS), is(true));
+            connector.close();
+            assertThat(runFailure.get(), nullValue());
+            assertThat(source.consumerCloseCalls.get(), is(1));
+            assertThat(source.clientCloseCalls.get(), is(1));
+            assertThat(source.shutdownCalls.get(), is(0));
+        } finally {
+            consumerClose.complete(null);
+            clientClose.complete(null);
+            connector.drain();
+            owner.join(WAIT.toMillis());
+        }
+        assertThat(owner.isAlive(), is(false));
+    }
+
+    @Test
+    void drainReportsExceptionalConsumerCloseAndStillClosesClient() throws Exception {
+        TestContext context = new TestContext(false);
+        IllegalStateException failure = new IllegalStateException("consumer close failed");
+        FakeSource source = new FakeSource(null,
+                                           context.reserved,
+                                           CompletableFuture.failedFuture(failure),
+                                           CompletableFuture.completedFuture(null));
+        source.blockReceive.set(true);
+        IncomingChannel connector = new PulsarIncomingChannel(_ -> source.client())
+                .createIncomingChannel(commonConfig(), config(1024));
+        AtomicReference<Throwable> runFailure = new AtomicReference<>();
+        Thread owner = Thread.ofVirtual().start(() -> run(connector, context, runFailure));
+
+        try {
+            assertThat(source.receiveEntered.await(WAIT.toMillis(), TimeUnit.MILLISECONDS), is(true));
+            connector.drain();
+            owner.join(WAIT.toMillis());
+            assertThat(owner.isAlive(), is(false));
+            assertThat(runFailure.get().getMessage(), containsString("Cannot close Pulsar consumer"));
+            assertThat(runFailure.get().getCause(), sameInstance(failure));
+            assertThat(assertThrows(MessagingException.class, connector::close), sameInstance(runFailure.get()));
+            assertThat(source.consumerCloseCalls.get(), is(1));
+            assertThat(source.clientCloseCalls.get(), is(1));
+            assertThat(source.shutdownCalls.get(), is(0));
+        } finally {
+            connector.drain();
+            owner.join(WAIT.toMillis());
+        }
+    }
+
+    @Test
+    void drainTimesOutPendingClientCloseAndShutsDownClient() throws Exception {
+        TestContext context = new TestContext(false);
+        CompletableFuture<Void> clientClose = new CompletableFuture<>();
+        FakeSource source = new FakeSource(null,
+                                           context.reserved,
+                                           CompletableFuture.completedFuture(null),
+                                           clientClose);
+        source.blockReceive.set(true);
+        PulsarIncomingConfig config = configBuilder(PulsarSchemaType.STRING, 1024)
+                .closeTimeout(Duration.ofMillis(100))
+                .build();
+        IncomingChannel connector = new PulsarIncomingChannel(_ -> source.client())
+                .createIncomingChannel(commonConfig(), config);
+        AtomicReference<Throwable> runFailure = new AtomicReference<>();
+        Thread owner = Thread.ofVirtual().start(() -> run(connector, context, runFailure));
+
+        try {
+            assertThat(source.receiveEntered.await(WAIT.toMillis(), TimeUnit.MILLISECONDS), is(true));
+            connector.drain();
+            owner.join(WAIT.toMillis());
+            assertThat(owner.isAlive(), is(false));
+            assertThat(runFailure.get().getMessage(), containsString("Timed out closing Pulsar client"));
+            assertThat(runFailure.get().getCause() instanceof TimeoutException, is(true));
+            assertThat(assertThrows(MessagingException.class, connector::close), sameInstance(runFailure.get()));
+            assertThat(source.consumerCloseCalls.get(), is(1));
+            assertThat(source.clientCloseCalls.get(), is(1));
+            assertThat(source.shutdownCalls.get(), is(1));
+        } finally {
+            clientClose.complete(null);
+            connector.drain();
+            owner.join(WAIT.toMillis());
+        }
+    }
 
     @Test
     void reservesBeforeReceiveAndAcknowledgesOnlyAfterRuntimeCompletion() throws Exception {
@@ -402,6 +529,71 @@ class PulsarIncomingChannelTest {
         assertThat(runFailure.get(), nullValue());
     }
 
+    private static void forceCloseDuringCleanup(boolean pendingConsumer, RuntimeException consumerFailure) throws Exception {
+        TestContext context = new TestContext(false);
+        CompletableFuture<Void> consumerClose = new CompletableFuture<>();
+        if (!pendingConsumer) {
+            if (consumerFailure == null) {
+                consumerClose.complete(null);
+            } else {
+                consumerClose.completeExceptionally(consumerFailure);
+            }
+        }
+        CompletableFuture<Void> clientClose = new CompletableFuture<>();
+        FakeSource source = new FakeSource(null, context.reserved, consumerClose, clientClose);
+        source.blockReceive.set(true);
+        PulsarIncomingConfig config = configBuilder(PulsarSchemaType.STRING, 1024)
+                .closeTimeout(Duration.ofSeconds(30))
+                .build();
+        IncomingChannel connector = new PulsarIncomingChannel(_ -> source.client())
+                .createIncomingChannel(commonConfig(), config);
+        AtomicReference<Throwable> runFailure = new AtomicReference<>();
+        CompletableFuture<Void> runCompletion = new CompletableFuture<>();
+        CompletableFuture<Void> forceCompletion = new CompletableFuture<>();
+        Thread owner = Thread.ofVirtual().start(() -> {
+            run(connector, context, runFailure);
+            runCompletion.complete(null);
+        });
+        Thread forceOwner = Thread.ofVirtual().unstarted(() -> {
+            try {
+                connector.forceClose();
+                forceCompletion.complete(null);
+            } catch (Throwable e) {
+                forceCompletion.completeExceptionally(e);
+            }
+        });
+
+        try {
+            assertThat(source.receiveEntered.await(WAIT.toMillis(), TimeUnit.MILLISECONDS), is(true));
+            connector.drain();
+            CountDownLatch closeEntered = pendingConsumer ? source.consumerCloseEntered : source.clientCloseEntered;
+            assertThat(closeEntered.await(WAIT.toMillis(), TimeUnit.MILLISECONDS), is(true));
+            forceOwner.start();
+            forceCompletion.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+            runCompletion.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+            assertThat(runFailure.get(), nullValue());
+            assertThat(clientClose.isDone(), is(false));
+            assertThat(consumerClose.isDone(), is(!pendingConsumer));
+            if (consumerFailure == null) {
+                connector.close();
+            } else {
+                MessagingException failure = assertThrows(MessagingException.class, connector::close);
+                assertThat(failure.getMessage(), containsString("Cannot close Pulsar consumer"));
+                assertThat(failure.getCause(), sameInstance(consumerFailure));
+                assertThat(failure.getSuppressed().length, is(0));
+            }
+            assertThat(source.shutdownCalls.get(), is(1));
+        } finally {
+            consumerClose.complete(null);
+            clientClose.complete(null);
+            connector.drain();
+            owner.join(WAIT.toMillis());
+            forceOwner.join(WAIT.toMillis());
+        }
+        assertThat(owner.isAlive(), is(false));
+        assertThat(forceOwner.isAlive(), is(false));
+    }
+
     private static void run(IncomingChannel connector,
                             IncomingConnectorContext context,
                             AtomicReference<Throwable> failure) {
@@ -653,6 +845,13 @@ class PulsarIncomingChannelTest {
     private static final class FakeSource {
         private final AtomicReference<Message<Object>> next;
         private final AtomicBoolean reserved;
+        private final CompletableFuture<Void> consumerClose;
+        private final CompletableFuture<Void> clientClose;
+        private final CountDownLatch consumerCloseEntered = new CountDownLatch(1);
+        private final CountDownLatch clientCloseEntered = new CountDownLatch(1);
+        private final AtomicInteger consumerCloseCalls = new AtomicInteger();
+        private final AtomicInteger clientCloseCalls = new AtomicInteger();
+        private final AtomicInteger shutdownCalls = new AtomicInteger();
         private final AtomicBoolean receivedAfterReservation = new AtomicBoolean();
         private final AtomicBoolean durable = new AtomicBoolean();
         private final AtomicBoolean startedPaused = new AtomicBoolean();
@@ -671,8 +870,17 @@ class PulsarIncomingChannelTest {
         private final PulsarClient client = clientProxy();
 
         private FakeSource(Message<Object> message, AtomicBoolean reserved) {
+            this(message, reserved, CompletableFuture.completedFuture(null), CompletableFuture.completedFuture(null));
+        }
+
+        private FakeSource(Message<Object> message,
+                           AtomicBoolean reserved,
+                           CompletableFuture<Void> consumerClose,
+                           CompletableFuture<Void> clientClose) {
             this.next = new AtomicReference<>(message);
             this.reserved = reserved;
+            this.consumerClose = consumerClose;
+            this.clientClose = clientClose;
         }
 
         private PulsarClient client() {
@@ -686,10 +894,13 @@ class PulsarIncomingChannelTest {
                 yield consumerBuilder;
             }
             case "closeAsync" -> {
-                closed.set(true);
-                yield CompletableFuture.completedFuture(null);
+                clientCloseCalls.incrementAndGet();
+                clientCloseEntered.countDown();
+                clientClose.thenRun(() -> closed.set(true));
+                yield clientClose;
             }
             case "shutdown" -> {
+                shutdownCalls.incrementAndGet();
                 closed.set(true);
                 yield null;
             }
@@ -741,7 +952,11 @@ class PulsarIncomingChannelTest {
                 negativelyAcknowledged.countDown();
                 yield null;
             }
-            case "closeAsync" -> CompletableFuture.completedFuture(null);
+            case "closeAsync" -> {
+                consumerCloseCalls.incrementAndGet();
+                consumerCloseEntered.countDown();
+                yield consumerClose;
+            }
             default -> PulsarTestSupport.defaultValue(method);
             });
         }
