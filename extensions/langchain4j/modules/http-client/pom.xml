@@ -155,9 +155,9 @@
                         <configuration>
                             <compilerArgs combine.children="append">
                                 <arg>--add-modules</arg>
-                                <arg>jdk.httpserver</arg>
+                                <arg>jdk.httpserver,java.net.http</arg>
                                 <arg>--add-reads</arg>
-                                <arg>io.helidon.extensions.langchain4j.httpclient=jdk.httpserver</arg>
+                                <arg>io.helidon.extensions.langchain4j.httpclient=jdk.httpserver,java.net.http</arg>
                             </compilerArgs>
                         </configuration>
                     </execution>
@@ -165,4 +165,117 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>keycloak-e2e</id>
+            <properties>
+                <version.lib.helidon-mcp>27.0.0</version.lib.helidon-mcp>
+            </properties>
+            <dependencyManagement>
+                <dependencies>
+                    <dependency>
+                        <groupId>io.helidon.extensions.mcp</groupId>
+                        <artifactId>helidon4-extensions-mcp-server</artifactId>
+                        <version>${version.lib.helidon-mcp}</version>
+                    </dependency>
+                </dependencies>
+            </dependencyManagement>
+            <dependencies>
+                <dependency>
+                    <groupId>io.helidon.extensions.mcp</groupId>
+                    <artifactId>helidon4-extensions-mcp-server</artifactId>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>io.helidon.webserver</groupId>
+                    <artifactId>helidon-webserver-context</artifactId>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>io.helidon.webserver</groupId>
+                    <artifactId>helidon-webserver-security</artifactId>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>io.helidon.security</groupId>
+                    <artifactId>helidon-security</artifactId>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>io.helidon.security.providers</groupId>
+                    <artifactId>helidon-security-providers-oidc</artifactId>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>io.helidon.webclient</groupId>
+                    <artifactId>helidon-webclient-tracing</artifactId>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>io.helidon.webserver.observe</groupId>
+                    <artifactId>helidon-webserver-observe</artifactId>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>io.helidon.webserver.observe</groupId>
+                    <artifactId>helidon-webserver-observe-tracing</artifactId>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>io.helidon.tracing.providers</groupId>
+                    <artifactId>helidon-tracing-providers-opentelemetry</artifactId>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>io.opentelemetry</groupId>
+                    <artifactId>opentelemetry-sdk</artifactId>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>io.opentelemetry</groupId>
+                    <artifactId>opentelemetry-sdk-trace</artifactId>
+                    <scope>test</scope>
+                </dependency>
+            </dependencies>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>build-helper-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>keycloak-integration-sources</id>
+                                <phase>generate-test-sources</phase>
+                                <goals>
+                                    <goal>add-test-source</goal>
+                                </goals>
+                                <configuration>
+                                    <sources>
+                                        <source>src/it/java</source>
+                                    </sources>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <useModulePath>false</useModulePath>
+                            <redirectTestOutputToFile>true</redirectTestOutputToFile>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

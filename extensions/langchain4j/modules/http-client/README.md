@@ -77,3 +77,59 @@ Supplying an existing WebClient, as above, makes ownership explicit.
 
 Multipart requests are outside this module's current MCP scope and are rejected explicitly.
 Configure WebClient's connect/read timeouts before passing it to the adapter.
+
+## Keycloak end-to-end test
+
+The opt-in `keycloak-e2e` profile tests the complete path:
+
+```text
+Keycloak JWT -> secured Helidon application -> LangChain4j MCP client
+            -> Helidon WebClient -> secured Helidon MCP server -> whoami tool
+```
+
+Both servers use Helidon OIDC authentication and independently verify Keycloak's JWT
+signature, issuer and audience. Native `ContextFeature` and `WebClientContextService`
+forward the bearer header. Native `TracingObserver` and `WebClientTracing` create and
+propagate real OpenTelemetry spans. The application handler does not copy headers and
+the MCP transport has no `customHeaders` supplier.
+
+The test checks two users with overlapping calls through one MCP client, exact JWT
+fingerprints at the MCP tool, distinct `traceparent` and `tracestate` values, and the
+parent chain from the incoming trace through both servers and the outbound client.
+Missing tokens and real tokens with corrupted signatures must be rejected at both
+servers. Test output never prints access tokens.
+
+Prerequisites: Java 27, Docker Compose, and the locally installed LangChain4j 1.23
+snapshot artifacts from PR #6726 (including `langchain4j-bom` and `langchain4j-mcp`).
+The test uses released Helidon and Helidon MCP 27.0.0, and Keycloak 26.8.0.
+
+From the repository root:
+
+```shell
+docker compose --project-name lc4j-2910-e2e \
+    -f extensions/langchain4j/modules/http-client/src/it/keycloak/compose.yaml up -d
+
+docker compose --project-name lc4j-2910-e2e \
+    -f extensions/langchain4j/modules/http-client/src/it/keycloak/compose.yaml port keycloak 8080
+```
+
+Use the printed loopback address below in place of `127.0.0.1:PORT`. Wait until realm
+discovery responds before running Maven:
+
+```shell
+curl --fail http://127.0.0.1:PORT/realms/lc4j-mcp-e2e/.well-known/openid-configuration
+
+mvn -Phttp-client,keycloak-e2e -pl extensions/langchain4j/modules/http-client -am \
+    -Dkeycloak.url=http://127.0.0.1:PORT clean verify
+```
+
+Always remove the fixture container afterward, including after a failed test:
+
+```shell
+docker compose --project-name lc4j-2910-e2e \
+    -f extensions/langchain4j/modules/http-client/src/it/keycloak/compose.yaml down --volumes
+```
+
+The realm contains only test credentials and is exposed on a loopback port. The integration
+profile fails if `keycloak.url` is missing; the regular unit-test build does not require Docker.
+Container startup/import follows the [Keycloak container guide](https://www.keycloak.org/server/containers).
