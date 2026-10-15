@@ -154,6 +154,9 @@ runtime's delivery limit. The runtime also bounds each partition's receive queue
 acquiring a batch and pauses acquisition while processing and settling it. Aggregate client prefetch across partitions
 can exceed the retained delivery limit.
 
+Native automatic receiver-queue scaling is disabled to preserve the per-partition queue bound. The connector owns this
+setting and overrides `consumer-properties.autoScaledReceiverQueueSizeEnabled`.
+
 A native receive completes when its count or byte threshold is reached, or when `receive-timeout` expires. Sparse
 traffic can wait for this collection window. An idle timeout does not dispatch an empty batch. To receive one message at
 a time, set `batch-receive-max-messages: 1`; this uses the same native receive path and completes when a message is

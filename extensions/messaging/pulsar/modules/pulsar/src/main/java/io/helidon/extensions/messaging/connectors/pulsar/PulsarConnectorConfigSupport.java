@@ -196,6 +196,8 @@ final class PulsarConnectorConfigSupport {
                 .subscriptionMode(SubscriptionMode.Durable)
                 .subscriptionInitialPosition(config.subscriptionInitialPosition().nativePosition())
                 .receiverQueueSize(queueSize)
+                // Native autoscaling can initialize a batch receive queue above receiverQueueSize.
+                .autoScaledReceiverQueueSizeEnabled(false)
                 .batchReceivePolicy(batchReceivePolicy)
                 .negativeAckRedeliveryDelay(durationMillis(config.negativeAckRedeliveryDelay()), TimeUnit.MILLISECONDS)
                 .ackTimeout(0, TimeUnit.MILLISECONDS)

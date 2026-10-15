@@ -37,6 +37,8 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
+import io.helidon.common.media.type.MediaTypes;
+import io.helidon.config.Config;
 import io.helidon.extensions.messaging.connectors.pulsar.PulsarConnector;
 import io.helidon.extensions.messaging.connectors.pulsar.PulsarIncomingConfig;
 import io.helidon.extensions.messaging.connectors.pulsar.PulsarMessage;
@@ -86,6 +88,7 @@ import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 
 @Testcontainers(disabledWithoutDocker = true)
 class PulsarConnectorIT {
@@ -645,6 +648,51 @@ class PulsarConnectorIT {
                     manager.shutdown();
                 }
                 assertSubscriptionEmpty(client, topic, subscription);
+            }
+        }
+    }
+
+    @Test
+    @Timeout(90)
+    void testNativeAutoscalingCannotExceedConfiguredPrefetchLimit() throws Exception {
+        String topic = uniqueName("autoscale-batch");
+        String subscription = uniqueName("autoscale-batch-reader");
+        List<String> payloads = Stream.iterate(0, i -> i + 1)
+                .limit(30)
+                .map(i -> "message-" + i)
+                .toList();
+        String yaml = batchYaml(topic, subscription, """
+                batch-receive-max-messages: 5
+                receiver-queue-size: 5
+                receive-timeout: PT30S
+                consumer-properties:
+                  autoScaledReceiverQueueSizeEnabled: true
+                execution:
+                  max-pending-messages: 5
+                  max-in-flight-messages: 5
+                """);
+        try (PulsarClient client = newClient()) {
+            seedBacklog(client, topic, subscription, payloads);
+            ServiceRegistryManager manager = PulsarScenarioRegistry.create(yaml, BlockingBatchReceiver.class);
+            BlockingBatchReceiver receiver = manager.registry().get(BlockingBatchReceiver.class);
+            try {
+                manager.registry().get(MessagingRuntime.class);
+                MessageBatch<String> batch = receiver.awaitBatch(WAIT_TIMEOUT);
+                assertThat(batch, notNullValue());
+                assertThat(batch.size(), is(5));
+                assertThat("the first delivery remains blocked", receiver.awaitBatch(NO_MESSAGE_TIMEOUT), nullValue());
+
+                var result = PULSAR.execInContainer("/pulsar/bin/pulsar-admin",
+                                                    "topics",
+                                                    "stats",
+                                                    canonicalTopic(topic));
+                assertThat(result.getStderr(), result.getExitCode(), is(0));
+                Config stats = Config.just(result.getStdout(), MediaTypes.APPLICATION_YAML);
+                assertThat("broker deliveries cannot exceed the retained batch plus the configured prefetch queue",
+                           stats.get("msgOutCounter").asLong().get(), lessThanOrEqualTo(10L));
+            } finally {
+                receiver.release();
+                manager.shutdown();
             }
         }
     }
