@@ -1,0 +1,79 @@
+# Helidon HTTP client for LangChain4j
+
+This opt-in module adapts a configured Helidon `WebClient` to LangChain4j's HTTP client SPI.
+It targets the JSON and SSE traffic used by the MCP Streamable HTTP transport.
+The WebClient's native services, TLS settings and timeouts apply to requests.
+
+## Development status
+
+This module requires the MCP SPI changes from LangChain4j PR #6726 and the aligned
+`1.23.0-SNAPSHOT` BOM. It is enabled by the `http-client` Maven profile while those
+changes are under review. The other Helidon LangChain4j modules still use 1.18.1;
+combining them with this adapter requires upgrading and validating the integration first.
+
+After installing the LangChain4j PR's MCP module, BOM and reactor prerequisites locally:
+
+```shell
+mvn -Phttp-client -pl extensions/langchain4j/modules/http-client -am test
+```
+
+## MCP context and header propagation
+
+Configure header propagation on the WebClient, then supply the adapter and the MCP
+context factory. The factory captures a caller's context before MCP defers work for
+initialization or retries. The adapter carries that context into its own virtual thread.
+
+```java
+WebClient webClient = WebClient.builder()
+        .addService(WebClientContextService.create(config -> config.addRecord(record -> record
+                .header(HeaderNames.create("X-Identity"))
+                .classifier("identity"))))
+        .build();
+
+HelidonHttpClient httpClient = HelidonHttpClient.builder()
+        .webClient(webClient)
+        .build();
+
+StreamableHttpMcpTransport transport = StreamableHttpMcpTransport.builder()
+        .url("http://localhost:8080/mcp")
+        .httpClient(httpClient)
+        .requestContextFactory(() -> {
+            Context captured = Contexts.context().orElseGet(Context::create);
+            return action -> () -> Contexts.runInContext(captured, action);
+        })
+        .build();
+```
+
+The types above come from `io.helidon.webclient.api`, `io.helidon.webclient.context`,
+`io.helidon.http`, `io.helidon.common.context`,
+`io.helidon.extensions.langchain4j.httpclient` and
+`dev.langchain4j.mcp.client.transport.http`. Add `helidon-webclient-context` to use
+the native header service. Register the desired value under the `identity` classifier
+in the caller's Helidon Context; no MCP `customHeaders` supplier is needed.
+
+The fresh empty context for an unbound caller is deliberate: it prevents that caller
+from inheriting a connection or completion thread's headers. Initialize a shared MCP
+client under an application or session context with the appropriate lifetime. MCP uses
+that capture for initialization and connection traffic; individual requests and retries
+retain their caller's capture. Servers that bind a session to one principal may require
+separate MCP clients for different principals.
+
+## Streaming and ownership
+
+The publisher uses the supplied incremental SSE parser and reads bounded byte chunks.
+Downstream demand controls event delivery. After draining a parsed batch, one further
+chunk can be read to discover EOF or the next events; those events must be delivered
+before another read. A partial event may span multiple chunks and is retained by the
+parser. Each subscription creates a separate
+HTTP exchange. Response callbacks run on a virtual thread with the captured Helidon context.
+
+Cancellation terminates the exchange and releases its response resources. Close the
+transport when finished, then close the adapter to cancel any remaining adapter work.
+The supplied WebClient remains caller-owned and should be closed separately with
+`webClient.closeResource()` when no longer shared.
+This also applies to WebClients created through the generated builder's configuration,
+consumer or supplier overloads; access that client through `httpClient.prototype().webClient()`.
+Supplying an existing WebClient, as above, makes ownership explicit.
+
+Multipart requests are outside this module's current MCP scope and are rejected explicitly.
+Configure WebClient's connect/read timeouts before passing it to the adapter.
