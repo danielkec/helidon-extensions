@@ -27,6 +27,8 @@ the unqualified data source when no explicit connection resource is configured. 
 select a named data source. The same data source can serve multiple AQ channels and ordinary application JDBC code.
 Default resource selection considers only unqualified services. Named data sources and connection factories require
 an explicit name selection, so an unrelated named service cannot override the application's default AQ factory.
+Statically named providers are excluded before initialization. Providers that determine instance qualifiers at
+runtime still need to be initialized to select an unqualified instance.
 
 ```yaml
 messaging:
@@ -139,6 +141,9 @@ Enable them only for queues whose publishers and serialized classes the applicat
 An incoming channel reserves runtime delivery capacity before receiving. It receives one message, waits for
 Messaging processing and failure handling to finish, then settles the delivery before receiving another.
 There is no message `ack()`/`nack()` API and no independent polling executor.
+ADT conversion failures, including incoming LOB size-limit violations, use the same configured drop, dead-letter,
+or terminal-failure handling as other payload mapping failures. Failed mappings retain available native metadata
+in an envelope whose body is unavailable.
 
 The default `transacted: true` gives each channel an AQ local transaction. Successful incoming processing
 commits the dequeue; unhandled failure rolls it back. Outgoing batches commit together on that channel,

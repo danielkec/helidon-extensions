@@ -146,13 +146,17 @@ class AqLobTest {
     void freesOversizedIncomingLobsBeforeReadingTheirContents() throws Exception {
         Blob blob = mock(Blob.class);
         when(blob.length()).thenReturn(5L);
-        assertThrows(MessagingException.class, () -> detach(struct("APP.VALUE", blob), 4));
+        OracleData blobData = detach(struct("APP.VALUE", blob), 4);
+        MessagingException blobFailure = assertThrows(MessagingException.class, () -> snapshot(blobData));
+        assertThat(blobFailure.getCause().getMessage(), containsString("exceeds max-body-bytes 4"));
         verify(blob, never()).getBytes(1, 5);
         verify(blob).free();
 
         for (Clob clob : List.of(mock(Clob.class), mock(NClob.class))) {
             when(clob.length()).thenReturn(5L);
-            assertThrows(MessagingException.class, () -> detach(struct("APP.VALUE", clob), 4));
+            OracleData clobData = detach(struct("APP.VALUE", clob), 4);
+            MessagingException clobFailure = assertThrows(MessagingException.class, () -> snapshot(clobData));
+            assertThat(clobFailure.getCause().getMessage(), containsString("exceeds max-body-bytes 4"));
             verify(clob, never()).getSubString(1, 5);
             verify(clob).free();
         }
@@ -162,15 +166,81 @@ class AqLobTest {
     void freesIncomingLobsAfterReadFailure() throws Exception {
         Blob blob = mock(Blob.class);
         when(blob.length()).thenReturn(1L);
-        when(blob.getBytes(1, 1)).thenThrow(new SQLException("read failed"));
-        assertThrows(SQLException.class, () -> detach(struct("APP.VALUE", blob), 4));
+        SQLException readFailure = new SQLException("read failed");
+        when(blob.getBytes(1, 1)).thenThrow(readFailure);
+        OracleData blobData = detach(struct("APP.VALUE", blob), 4);
+        MessagingException blobFailure = assertThrows(MessagingException.class, () -> snapshot(blobData));
+        assertThat(blobFailure.getCause(), sameInstance(readFailure));
         verify(blob).free();
 
         Clob clob = mock(Clob.class);
         when(clob.length()).thenReturn(1L);
-        when(clob.getSubString(1, 1)).thenThrow(new SQLException("read failed"));
-        assertThrows(SQLException.class, () -> detach(struct("APP.VALUE", clob), 4));
+        when(clob.getSubString(1, 1)).thenThrow(readFailure);
+        OracleData clobData = detach(struct("APP.VALUE", clob), 4);
+        MessagingException clobFailure = assertThrows(MessagingException.class, () -> snapshot(clobData));
+        assertThat(clobFailure.getCause(), sameInstance(readFailure));
         verify(clob).free();
+    }
+
+    @Test
+    void preservesMappingFailureAndFreesRemainingNestedResources() throws Exception {
+        Blob blob = mock(Blob.class);
+        IllegalStateException readFailure = new IllegalStateException("LOB read failed");
+        when(blob.length()).thenThrow(readFailure);
+        SQLException cleanupFailure = new SQLException("LOB free failed");
+        doThrow(cleanupFailure).when(blob).free();
+        Clob sibling = mock(Clob.class);
+        when(sibling.length()).thenReturn(1L);
+        when(sibling.getSubString(1, 1)).thenReturn("a");
+        OracleArray array = mock(OracleArray.class);
+        Struct first = struct("APP.VALUE", blob);
+        Struct second = struct("APP.VALUE", sibling);
+        when(array.getSQLTypeName()).thenReturn("APP.VALUES");
+        when(array.getArray()).thenReturn(new Object[]{first, second});
+
+        OracleData data = detach(struct("APP.ENVELOPE", array), 4);
+        MessagingException failure = assertThrows(MessagingException.class, () -> snapshot(data));
+
+        assertThat(failure.getCause(), sameInstance(readFailure));
+        assertThat(readFailure.getSuppressed(), is(new Throwable[]{cleanupFailure}));
+        verify(blob).free();
+        verify(sibling).free();
+        verify(array).free();
+        SQLException outgoingFailure = assertThrows(SQLException.class,
+                                                    () -> data.toJDBCObject(mock(Connection.class)));
+        assertThat(outgoingFailure.getCause(), sameInstance(readFailure));
+    }
+
+    @Test
+    void failedAdtPayloadRetainsMessageMetadata() throws Exception {
+        OracleData data = detach(struct("APP.VALUE", new Object()), 4);
+        AdtMessage incoming = mock(AdtMessage.class);
+        when(incoming.getAdtPayload()).thenReturn(data);
+        when(incoming.getPropertyNames()).thenReturn(Collections.emptyEnumeration());
+        when(incoming.getJMSMessageID()).thenReturn("ID:failed-adt");
+        when(incoming.getJMSCorrelationID()).thenReturn("order-1");
+
+        MessagingException failure = assertThrows(MessagingException.class,
+                                                  () -> AqMessageMapper.fromNative(incoming, config(4)));
+        assertThat(failure.getCause().getMessage(), containsString("Unsupported detached SQL attribute"));
+        AqMessage<?> metadata = AqMessageMapper.metadataOnly(incoming);
+        assertThat(metadata.messageId().orElseThrow(), is("ID:failed-adt"));
+        assertThat(metadata.correlationId().orElseThrow(), is("order-1"));
+        assertThat(metadata.bodyAvailable(), is(false));
+        assertThrows(MessagingException.class, metadata::entity);
+        AqMessageMapper.releaseNative(incoming);
+    }
+
+    @Test
+    void fatalErrorsEscapeThePayloadFactoryAfterCleanup() throws Exception {
+        Blob blob = mock(Blob.class);
+        AssertionError fatal = new AssertionError("fatal read failure");
+        when(blob.length()).thenThrow(fatal);
+
+        AssertionError failure = assertThrows(AssertionError.class, () -> detach(struct("APP.VALUE", blob), 4));
+
+        assertThat(failure, sameInstance(fatal));
+        verify(blob).free();
     }
 
     @Test

@@ -47,14 +47,19 @@ import io.helidon.extensions.messaging.connectors.aq.AqConnector;
 import io.helidon.extensions.messaging.connectors.aq.AqDestinationType;
 import io.helidon.extensions.messaging.connectors.aq.AqIncomingConfig;
 import io.helidon.extensions.messaging.connectors.aq.AqMessage;
+import io.helidon.extensions.messaging.connectors.aq.AqOutgoingConfig;
+import io.helidon.extensions.messaging.connectors.aq.AqPayloadType;
 import io.helidon.extensions.messaging.connectors.aq.AqRecipient;
 import io.helidon.extensions.messaging.connectors.aq.AqXml;
 import io.helidon.messaging.BatchDeliveryException;
 import io.helidon.messaging.BatchItemStatus;
 import io.helidon.messaging.ConsumerRegistration;
+import io.helidon.messaging.DeadLetterMessage;
+import io.helidon.messaging.FailureDisposition;
 import io.helidon.messaging.Message;
 import io.helidon.messaging.MessageBatch;
 import io.helidon.messaging.MessagingChannel;
+import io.helidon.messaging.MessagingException;
 import io.helidon.messaging.MessagingGraph;
 import io.helidon.messaging.MessagingRuntime;
 import io.helidon.service.registry.DescriptorHandler;
@@ -64,6 +69,8 @@ import io.helidon.service.registry.ServiceRegistryConfig;
 import io.helidon.service.registry.ServiceRegistryException;
 import io.helidon.service.registry.ServiceRegistryManager;
 
+import oracle.jdbc.OracleData;
+import oracle.jdbc.OracleDataFactory;
 import oracle.jms.AQjmsFactory;
 import oracle.jms.AQjmsSession;
 import org.junit.jupiter.api.AfterAll;
@@ -329,6 +336,71 @@ class AqConnectorIT {
     }
 
     @Test
+    void oversizedAdtIsDroppedBeforeReceivingTheNextMessage() throws Exception {
+        Receiver receiver = new Receiver();
+        ServiceRegistryManager manager = runtime("LOB_DROP_QUEUE", "payload-type: ADT", """
+                max-body-bytes: 2
+                failure:
+                  on-exhausted: DROP
+                """, receiver);
+        messaging(manager).emit("outgoing", AqMessage.builder(binaryLobValue(new byte[]{1, 2, 3}))
+                .correlationId("oversized").build());
+        messaging(manager).emit("outgoing", AqMessage.builder(binaryLobValue(new byte[]{1}))
+                .correlationId("valid").build());
+
+        AqMessage<?> received = receiver.await();
+        assertThat(received.correlationId(), is(Optional.of("valid")));
+        assertThat(((AqBlob) ((AqAdt) received.entity()).attributes().getFirst()).bytes(), is(new byte[]{1}));
+        manager.shutdown();
+        managers.remove(manager);
+        assertThat("both the dropped and processed messages must be settled", adtAvailable("LOB_DROP_QUEUE"), is(false));
+    }
+
+    @Test
+    void oversizedAdtCanBeDeadLetteredWithItsMetadata() throws Exception {
+        AqConnector connector = AqConnector.builder().name("lob-aq").dataSource(database.dataSource())
+                .schema(database.schema()).destination("LOB_DLQ_QUEUE").payloadType(AqPayloadType.ADT).build();
+        AqIncomingConfig incoming = AqIncomingConfig.builder().connector("lob-aq").channelName("incoming")
+                .maxBodyBytes(2)
+                .failure(failure -> failure.onExhausted(FailureDisposition.DEAD_LETTER)
+                        .deadLetter(deadLetter -> deadLetter.channel("dead-letter")))
+                .build();
+        var source = MessagingChannel.create("incoming", AqAdt.class);
+        var deadLetterChannel = MessagingChannel.create("dead-letter", AqAdt.class);
+        BlockingQueue<Message<?>> delivered = new LinkedBlockingQueue<>();
+        BlockingQueue<Message<?>> deadLetters = new LinkedBlockingQueue<>();
+        try (var graph = MessagingGraph.builder().addConnector(connector)
+                .channel(source).channel(deadLetterChannel).incoming(Map.of("incoming", incoming))
+                .messageSink(source, delivered::add).messageSink(deadLetterChannel, deadLetters::add).build();
+             var outgoing = connector.outgoing(AqOutgoingConfig.builder().connector("lob-aq").channelName("outgoing").build())) {
+            graph.start();
+            outgoing.start();
+            outgoing.sendBatch(MessageBatch.create(AqMessage.builder(binaryLobValue(new byte[]{1, 2, 3}))
+                                                           .correlationId("oversized").build()));
+            outgoing.sendBatch(MessageBatch.create(AqMessage.builder(binaryLobValue(new byte[]{1}))
+                                                           .correlationId("valid").build()));
+
+            Message<?> failed = deadLetters.poll(20, TimeUnit.SECONDS);
+            assertThat(failed, instanceOf(DeadLetterMessage.class));
+            DeadLetterMessage<?> deadLetter = (DeadLetterMessage<?>) failed;
+            assertThat(deadLetter.sourceChannel(), is("incoming"));
+            assertThat(deadLetter.attempts(), is(1));
+            assertThat(deadLetter.originalMessage(), instanceOf(AqMessage.class));
+            AqMessage<?> original = (AqMessage<?>) deadLetter.originalMessage();
+            assertThat(original.correlationId(), is(Optional.of("oversized")));
+            assertThat(original.messageId().isPresent(), is(true));
+            assertThat(original.bodyAvailable(), is(false));
+            assertThrows(MessagingException.class, original::entity);
+
+            Message<?> valid = delivered.poll(20, TimeUnit.SECONDS);
+            assertThat(valid, instanceOf(AqMessage.class));
+            assertThat(((AqMessage<?>) valid).correlationId(), is(Optional.of("valid")));
+        }
+        assertThat("dead-letter handling and subsequent processing must settle both messages",
+                   adtAvailable("LOB_DLQ_QUEUE"), is(false));
+    }
+
+    @Test
     @EnabledIfSystemProperty(named = "aq.test.xml", matches = "true")
     void xmlTypeRoundTripRetainsXmlContent() throws Exception {
         Receiver receiver = new Receiver();
@@ -432,6 +504,24 @@ class AqConnectorIT {
                 .addAttribute(AqClob.builder().text("LOB content").build())
                 .addAttribute(AqClob.builder().text("národní 漢字").national(true).build())
                 .build();
+    }
+
+    private AqAdt binaryLobValue(byte[] bytes) {
+        return AqAdt.builder().typeName(database.schema() + ".AQ_TEST_LOBS")
+                .addAttribute(AqBlob.builder().bytes(bytes).build())
+                .addAttribute(AqAdt.NullValue.INSTANCE).addAttribute(AqAdt.NullValue.INSTANCE).build();
+    }
+
+    private boolean adtAvailable(String queue) throws Exception {
+        try (Connection connection = AQjmsFactory.getConnectionFactory(database.dataSource()).createConnection();
+             Session session = connection.createSession(true, Session.SESSION_TRANSACTED)) {
+            connection.start();
+            AQjmsSession aq = (AQjmsSession) session;
+            OracleDataFactory factory = (value, _) -> (OracleData) _ -> value;
+            try (MessageConsumer consumer = aq.createReceiver(aq.getQueue(database.schema(), queue), null, factory)) {
+                return consumer.receive(200) != null;
+            }
+        }
     }
 
     private ServiceRegistryManager runtime(String queue, String options, String incomingOptions, Receiver receiver) {

@@ -26,6 +26,7 @@ import javax.jms.JMSException;
 import javax.sql.DataSource;
 
 import io.helidon.messaging.MessagingException;
+import io.helidon.service.registry.FactoryType;
 import io.helidon.service.registry.Lookup;
 import io.helidon.service.registry.ServiceInstance;
 import io.helidon.service.registry.ServiceRegistry;
@@ -86,7 +87,16 @@ final class AqResourceResolver {
     }
 
     private static <T> Optional<T> unqualified(ServiceRegistry registry, Class<T> contract) {
-        return registry.<T>lookupInstances(Lookup.create(contract)).stream()
+        Lookup lookup = Lookup.create(contract);
+        return registry.lookupServices(lookup).stream()
+                // These factories may supply instances with qualifiers different from the factory's qualifiers.
+                .filter(service -> service.qualifiers().isEmpty()
+                        || service.factoryType() == FactoryType.SERVICES
+                        || service.factoryType() == FactoryType.INJECTION_POINT)
+                .flatMap(service -> registry.<T>lookupInstances(Lookup.builder(lookup)
+                                .serviceType(service.serviceType())
+                                .build())
+                        .stream())
                 .filter(instance -> instance.qualifiers().isEmpty())
                 .map(ServiceInstance::get)
                 .findFirst();

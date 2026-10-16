@@ -154,11 +154,16 @@ final class AqMessageMapper {
             case JMS -> null;
             case XML -> XMLType.getORADataFactory();
             case ADT -> (OracleDataFactory) (value, _) -> {
-                Object detached = detach(value, config.maxBodyBytes());
-                if (!(detached instanceof AqAdt adt) || adt.kind() != AqAdt.Kind.STRUCT) {
-                    throw new SQLException("AQ ADT payload must be an Oracle SQL object");
+                try {
+                    Object detached = detach(value, config.maxBodyBytes());
+                    if (!(detached instanceof AqAdt adt) || adt.kind() != AqAdt.Kind.STRUCT) {
+                        throw new SQLException("AQ ADT payload must be an Oracle SQL object");
+                    }
+                    return new AdtData(adt);
+                } catch (SQLException | RuntimeException failure) {
+                    // Let dequeue finish so the connector can apply the configured message failure policy.
+                    return new FailedAdtData(failure);
                 }
-                return new AdtData(adt);
             };
         };
     }
@@ -191,6 +196,9 @@ final class AqMessageMapper {
             }
             if (payload instanceof AdtData data) {
                 return data.payload;
+            }
+            if (payload instanceof FailedAdtData data) {
+                throw new MessagingException("Cannot snapshot incoming AQ ADT payload", data.failure);
             }
             throw new MessagingException("Unsupported AQ ADT factory result: "
                                                  + (payload == null ? "null" : payload.getClass().getName()));
@@ -386,49 +394,58 @@ final class AqMessageMapper {
         }
         if (value instanceof Struct struct) {
             AqAdtConfig.Builder builder = AqAdt.builder().typeName(struct.getSQLTypeName());
-            for (Object attribute : struct.getAttributes()) {
-                builder.addAttribute(detach(attribute, maxBodyBytes));
-            }
+            detachAttributes(builder, struct.getAttributes(), maxBodyBytes);
             return builder.build();
         }
         if (value instanceof OracleArray array) {
-            try {
+            try (SqlResource _ = array::free) {
                 AqAdtConfig.Builder builder = AqAdt.builder().typeName(array.getSQLTypeName()).kind(AqAdt.Kind.ARRAY);
-                Object values = array.getArray();
-                for (int i = 0; i < java.lang.reflect.Array.getLength(values); i++) {
-                    builder.addAttribute(detach(java.lang.reflect.Array.get(values, i), maxBodyBytes));
-                }
+                detachAttributes(builder, array.getArray(), maxBodyBytes);
                 return builder.build();
-            } finally {
-                array.free();
             }
         }
         if (value instanceof Blob blob) {
-            try {
+            try (SqlResource _ = blob::free) {
                 long length = blob.length();
                 requireLength(length, maxBodyBytes);
                 return AqBlob.builder().bytes(blob.getBytes(1, (int) length)).build();
-            } finally {
-                blob.free();
             }
         }
         if (value instanceof Clob clob) {
-            try {
+            try (SqlResource _ = clob::free) {
                 long length = clob.length();
                 requireLength(length, maxBodyBytes);
                 return AqClob.builder().text(clob.getSubString(1, (int) length)).national(clob instanceof NClob).build();
-            } finally {
-                clob.free();
             }
         }
         if (value instanceof SQLXML xml) {
-            try {
+            try (SqlResource _ = xml::free) {
                 return AqXml.builder().text(xml.getString()).build();
-            } finally {
-                xml.free();
             }
         }
         return AqValues.sqlValue(value);
+    }
+
+    private static void detachAttributes(AqAdtConfig.Builder builder, Object values, int maxBodyBytes) throws SQLException {
+        Exception failure = null;
+        for (int i = 0; i < java.lang.reflect.Array.getLength(values); i++) {
+            try {
+                builder.addAttribute(detach(java.lang.reflect.Array.get(values, i), maxBodyBytes));
+            } catch (SQLException | RuntimeException e) {
+                // Finish detaching siblings so their JDBC resources are released as well.
+                if (failure == null) {
+                    failure = e;
+                } else if (failure != e) {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
+        if (failure instanceof SQLException sql) {
+            throw sql;
+        }
+        if (failure instanceof RuntimeException runtime) {
+            throw runtime;
+        }
     }
 
     private static Object attach(Object value, Connection connection, List<AutoCloseable> resources) throws SQLException {
@@ -492,6 +509,24 @@ final class AqMessageMapper {
     private static void requireLength(long length, int maxBodyBytes) {
         if (length < 0 || length > maxBodyBytes) {
             throw new MessagingException("AQ payload length " + length + " exceeds max-body-bytes " + maxBodyBytes);
+        }
+    }
+
+    private interface SqlResource extends AutoCloseable {
+        @Override
+        void close() throws SQLException;
+    }
+
+    private static final class FailedAdtData implements OracleData {
+        private final Exception failure;
+
+        private FailedAdtData(Exception failure) {
+            this.failure = failure;
+        }
+
+        @Override
+        public Object toJDBCObject(Connection connection) throws SQLException {
+            throw new SQLException("Cannot map an unavailable AQ ADT payload", failure);
         }
     }
 

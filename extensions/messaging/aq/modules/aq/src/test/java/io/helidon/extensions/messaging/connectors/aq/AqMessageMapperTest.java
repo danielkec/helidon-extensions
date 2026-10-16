@@ -290,6 +290,19 @@ class AqMessageMapperTest {
     }
 
     @Test
+    void invalidAdtRootFailsDuringSnapshotInsteadOfDequeue() throws Exception {
+        OracleDataFactory factory = (OracleDataFactory) AqMessageMapper.payloadFactory(config(AqPayloadType.ADT, false));
+        OracleData data = factory.create("not an SQL object", Types.VARCHAR);
+        AdtMessage incoming = mock(AdtMessage.class);
+        when(incoming.getAdtPayload()).thenReturn(data);
+
+        MessagingException failure = assertThrows(MessagingException.class,
+                                                  () -> AqMessageMapper.fromNative(incoming, config(AqPayloadType.ADT, false)));
+
+        assertThat(failure.getCause().getMessage(), is("AQ ADT payload must be an Oracle SQL object"));
+    }
+
+    @Test
     void xmlIsDetachedAndClosedBeforeDelivery() throws Exception {
         XMLType xml = mock(XMLType.class);
         when(xml.getStringVal()).thenReturn("<order id=\"42\"/>");
