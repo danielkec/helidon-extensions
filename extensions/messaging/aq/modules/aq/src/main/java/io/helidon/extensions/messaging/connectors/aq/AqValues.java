@@ -64,7 +64,8 @@ final class AqValues {
         if (value instanceof Time time) {
             return new Time(time.getTime());
         }
-        if (value instanceof AqAdt || value instanceof AqXml || value instanceof AqAdt.NullValue
+        if (value instanceof AqAdt || value instanceof AqXml || value instanceof AqBlob || value instanceof AqClob
+                || value instanceof AqAdt.NullValue
                 || value instanceof String || value instanceof Boolean || value instanceof Character
                 || value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long
                 || value instanceof Float || value instanceof Double || value instanceof BigDecimal || value instanceof BigInteger

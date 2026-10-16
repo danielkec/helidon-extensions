@@ -25,6 +25,8 @@ These are specification API dependencies, not Helidon JMS connectors.
 Register the application-owned `javax.sql.DataSource` with Helidon's Service Registry. The connector resolves
 the unqualified data source when no explicit connection resource is configured. Use `data-source-name` to
 select a named data source. The same data source can serve multiple AQ channels and ordinary application JDBC code.
+Default resource selection considers only unqualified services. Named data sources and connection factories require
+an explicit name selection, so an unrelated named service cannot override the application's default AQ factory.
 
 ```yaml
 messaging:
@@ -117,6 +119,18 @@ AqXml xml = AqXml.builder().text("<order id=\"42\"/>").build();
 `AqAdt` values. XML is represented as text after the provider value is detached. Native objects requiring
 unsupported JDBC attribute types fail conversion; they are not exposed as live JDBC objects.
 
+SQL LOB attributes retain their type in detached `AqBlob` and `AqClob` values, including inside nested objects and arrays:
+
+```java
+AqBlob binary = AqBlob.builder().bytes(new byte[] {1, 2, 3}).build();
+AqClob text = AqClob.builder().text("CLOB content").build();
+AqClob nationalText = AqClob.builder().text("NCLOB content").national(true).build();
+```
+
+An incoming ADT can be forwarded with these values intact. The connector creates temporary LOBs on the sending
+connection and releases them after use. Plain byte arrays and strings remain appropriate for RAW and character
+attributes. `max-body-bytes` bounds binary LOB bytes and character LOB characters retained per incoming value.
+
 Java object messages are disabled by default because deserialization executes application class code.
 Enable them only for queues whose publishers and serialized classes the application trusts.
 
@@ -139,6 +153,8 @@ outputs remain visible if another output fails.
 Shutdown drains active processing before releasing channel resources. A configured timeout bounds graceful
 cleanup; interrupted or abandoned deliveries remain unsettled. Database connection failures currently stop
 the affected source or fail the send; automatic reconnect and replay are not implemented in this initial version.
+Draining cancels an idle dequeue independently of `receive-timeout`, while an already received message is allowed
+to finish processing and settlement before its session closes.
 
 ## Configuration defaults
 

@@ -22,6 +22,7 @@ import java.sql.Array;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.Connection;
+import java.sql.NClob;
 import java.sql.SQLException;
 import java.sql.SQLXML;
 import java.sql.Struct;
@@ -246,7 +247,13 @@ final class AqMessageMapper {
             if (!(entity instanceof AqAdt adt) || adt.kind() != AqAdt.Kind.STRUCT) {
                 throw new MessagingException("AQ ADT payloads require an AqAdt SQL object");
             }
-            return aqSession(session).createORAMessage(new AdtData(adt));
+            AdtData data = new AdtData(adt);
+            try {
+                return aqSession(session).createORAMessage(data);
+            } catch (JMSException | RuntimeException | Error failure) {
+                data.releaseAfterFailure(failure);
+                throw failure;
+            }
         }
         if (config.payloadType() == AqPayloadType.XML) {
             String text = entity instanceof AqXml xml ? xml.text() : entity instanceof String string ? string : null;
@@ -398,16 +405,18 @@ final class AqMessageMapper {
         }
         if (value instanceof Blob blob) {
             try {
-                requireLength(blob.length(), maxBodyBytes);
-                return blob.getBytes(1, (int) blob.length());
+                long length = blob.length();
+                requireLength(length, maxBodyBytes);
+                return AqBlob.builder().bytes(blob.getBytes(1, (int) length)).build();
             } finally {
                 blob.free();
             }
         }
         if (value instanceof Clob clob) {
             try {
-                requireLength(clob.length(), maxBodyBytes);
-                return clob.getSubString(1, (int) clob.length());
+                long length = clob.length();
+                requireLength(length, maxBodyBytes);
+                return AqClob.builder().text(clob.getSubString(1, (int) length)).national(clob instanceof NClob).build();
             } finally {
                 clob.free();
             }
@@ -445,6 +454,18 @@ final class AqMessageMapper {
             XMLType nativeXml = XMLType.createXML(connection, xml.text());
             resources.add(nativeXml::close);
             return nativeXml;
+        }
+        if (value instanceof AqBlob blob) {
+            Blob nativeBlob = connection.createBlob();
+            resources.add(nativeBlob::free);
+            nativeBlob.setBytes(1, blob.bytes());
+            return nativeBlob;
+        }
+        if (value instanceof AqClob clob) {
+            Clob nativeClob = clob.national() ? connection.createNClob() : connection.createClob();
+            resources.add(nativeClob::free);
+            nativeClob.setString(1, clob.text());
+            return nativeClob;
         }
         return AqValues.sqlValue(value);
     }
@@ -484,7 +505,20 @@ final class AqMessageMapper {
 
         @Override
         public Object toJDBCObject(Connection connection) throws SQLException {
-            return attach(payload, connection, resources);
+            try {
+                return attach(payload, connection, resources);
+            } catch (SQLException | RuntimeException | Error failure) {
+                releaseAfterFailure(failure);
+                throw failure;
+            }
+        }
+
+        private void releaseAfterFailure(Throwable failure) {
+            try {
+                release();
+            } catch (SQLException cleanup) {
+                failure.addSuppressed(cleanup);
+            }
         }
 
         private void release() throws SQLException {

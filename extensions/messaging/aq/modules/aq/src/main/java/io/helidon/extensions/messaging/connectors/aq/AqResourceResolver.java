@@ -17,6 +17,7 @@
 package io.helidon.extensions.messaging.connectors.aq;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.function.Supplier;
 
@@ -25,6 +26,8 @@ import javax.jms.JMSException;
 import javax.sql.DataSource;
 
 import io.helidon.messaging.MessagingException;
+import io.helidon.service.registry.Lookup;
+import io.helidon.service.registry.ServiceInstance;
 import io.helidon.service.registry.ServiceRegistry;
 
 import oracle.jms.AQjmsFactory;
@@ -67,11 +70,11 @@ final class AqResourceResolver {
                         .orElseThrow(() -> missing(config, "DataSource named " + name));
                 return AQjmsFactory.getConnectionFactory(source);
             }
-            var dataSource = services.first(DataSource.class);
+            var dataSource = unqualified(services, DataSource.class);
             if (dataSource.isPresent()) {
                 return AQjmsFactory.getConnectionFactory(dataSource.orElseThrow());
             }
-            return services.first(ConnectionFactory.class)
+            return unqualified(services, ConnectionFactory.class)
                     .orElseThrow(() -> missing(config, "DataSource or AQ ConnectionFactory"));
         } catch (JMSException e) {
             throw new MessagingException("Cannot resolve AQ connection factory for channel " + config.channelName(), e);
@@ -80,5 +83,12 @@ final class AqResourceResolver {
 
     private static MessagingException missing(AqRuntimeConfig config, String resource) {
         return new MessagingException("No " + resource + " is registered for AQ channel " + config.channelName());
+    }
+
+    private static <T> Optional<T> unqualified(ServiceRegistry registry, Class<T> contract) {
+        return registry.<T>lookupInstances(Lookup.create(contract)).stream()
+                .filter(instance -> instance.qualifiers().isEmpty())
+                .map(ServiceInstance::get)
+                .findFirst();
     }
 }

@@ -51,6 +51,8 @@ final class AqIncomingChannel implements IncomingChannel {
     private final Condition deliveryPublished = deliveryLock.newCondition();
 
     private boolean deliveryStarting;
+    private boolean receiving;
+    private boolean receiveInterrupted;
 
     AqIncomingChannel(AqRuntimeConfig config, AqResourceResolver resolver) {
         this.config = Objects.requireNonNull(config);
@@ -126,8 +128,23 @@ final class AqIncomingChannel implements IncomingChannel {
 
     @Override
     public void drain() {
-        draining.set(true);
-        acquisitionStopped.countDown();
+        deliveryLock.lock();
+        try {
+            if (!draining.compareAndSet(false, true)) {
+                return;
+            }
+            acquisitionStopped.countDown();
+            if (receiving) {
+                Thread running = owner.get();
+                if (!closed.get() && running != null && running != Thread.currentThread() && !running.isInterrupted()) {
+                    // AQ's native JDBC dequeue can ignore consumer.close cancellation while blocked in socket I/O.
+                    receiveInterrupted = true;
+                    running.interrupt();
+                }
+            }
+        } finally {
+            deliveryLock.unlock();
+        }
     }
 
     @Override
@@ -170,7 +187,36 @@ final class AqIncomingChannel implements IncomingChannel {
     }
 
     private void receive(ConnectorDeliveryReservation reservation) throws JMSException {
-        Message nativeMessage = resources.consumer().receive(config.receiveTimeout().toMillis());
+        Message nativeMessage;
+        deliveryLock.lock();
+        try {
+            if (closed.get() || draining.get()) {
+                return;
+            }
+            receiving = true;
+        } finally {
+            deliveryLock.unlock();
+        }
+        try {
+            nativeMessage = resources.consumer().receive(config.receiveTimeout().toMillis());
+        } catch (JMSException e) {
+            if (draining.get()) {
+                return;
+            }
+            throw e;
+        } finally {
+            deliveryLock.lock();
+            try {
+                receiving = false;
+                if (receiveInterrupted && !closed.get()) {
+                    // A message can win the drain race. Its processing and settlement must not inherit this interrupt.
+                    Thread.interrupted();
+                }
+                receiveInterrupted = false;
+            } finally {
+                deliveryLock.unlock();
+            }
+        }
         if (nativeMessage == null || closed.get()) {
             return;
         }

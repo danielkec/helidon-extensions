@@ -22,7 +22,8 @@ import java.util.Objects;
 /**
  * Detached Oracle SQL object, or a named SQL array nested inside an object.
  * Attribute values support scalar JDBC values, byte arrays, nested {@code AqAdt}
- * values, and {@link AqXml}. SQL NULL is represented by {@link NullValue#INSTANCE}.
+ * values, {@link AqXml}, {@link AqBlob}, and {@link AqClob}.
+ * SQL NULL is represented by {@link NullValue#INSTANCE}.
  * Mutable binary and temporal values are defensively copied.
  */
 public final class AqAdt {

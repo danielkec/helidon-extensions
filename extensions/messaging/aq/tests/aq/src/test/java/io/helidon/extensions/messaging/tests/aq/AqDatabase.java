@@ -23,6 +23,7 @@ import java.sql.SQLException;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import javax.sql.DataSource;
 
@@ -82,10 +83,48 @@ final class AqDatabase implements AutoCloseable {
         return schema;
     }
 
+    void awaitDequeue() throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        try (Connection connection = administrator.getConnection();
+             var statement = connection.prepareStatement(
+                     "SELECT COUNT(*) FROM V$SESSION WHERE USERNAME = ? AND STATE = 'WAITING' AND EVENT LIKE '%AQ:%'")) {
+            statement.setString(1, schema);
+            while (System.nanoTime() < deadline) {
+                try (var result = statement.executeQuery()) {
+                    result.next();
+                    if (result.getInt(1) > 0) {
+                        return;
+                    }
+                }
+                TimeUnit.MILLISECONDS.sleep(20);
+            }
+        }
+        throw new AssertionError("AQ source did not enter the database dequeue wait");
+    }
+
     @Override
     public void close() throws SQLException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(40);
         try (Connection connection = administrator.getConnection(); var statement = connection.createStatement()) {
-            statement.execute("DROP USER " + schema + " CASCADE");
+            while (true) {
+                try {
+                    statement.execute("DROP USER " + schema + " CASCADE");
+                    return;
+                } catch (SQLException failure) {
+                    // A cancelled JDBC read closes its socket before the server finishes its pending dequeue.
+                    if (failure.getErrorCode() != 1940 || System.nanoTime() >= deadline) {
+                        throw failure;
+                    }
+                    try {
+                        TimeUnit.MILLISECONDS.sleep(100);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        SQLException interrupted = new SQLException("Interrupted while removing AQ test schema", e);
+                        interrupted.addSuppressed(failure);
+                        throw interrupted;
+                    }
+                }
+            }
         }
     }
 

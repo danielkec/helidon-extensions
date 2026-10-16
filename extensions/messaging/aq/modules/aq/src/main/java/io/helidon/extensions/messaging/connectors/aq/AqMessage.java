@@ -34,6 +34,7 @@ import io.helidon.messaging.MessageHeaders;
 import io.helidon.messaging.MessagingException;
 
 import oracle.jms.AQjmsAgent;
+import oracle.jms.AQjmsDestination;
 import oracle.jms.AQjmsMessage;
 import oracle.jms.AdtMessage;
 
@@ -106,9 +107,15 @@ public final class AqMessage<T> implements Message<T> {
         this.correlationId = Optional.ofNullable(message.getJMSCorrelationID());
         this.type = message instanceof AdtMessage ? Optional.empty() : Optional.ofNullable(message.getJMSType());
         Destination destination = message instanceof AdtMessage ? null : message.getJMSReplyTo();
-        this.replyTo = destinationName(destination);
+        if (destination instanceof AQjmsDestination aq) {
+            // Oracle destinations implement both Queue and Topic; only the matching name accessor returns a value.
+            this.replyTo = Optional.of(aq.getCompleteName());
+            this.replyToType = aq.getQueueName() == null ? AqDestinationType.TOPIC : AqDestinationType.QUEUE;
+        } else {
+            this.replyTo = destinationName(destination);
+            this.replyToType = destination instanceof Topic ? AqDestinationType.TOPIC : AqDestinationType.QUEUE;
+        }
         this.replyToAgent = destination instanceof AQjmsAgent agent ? sender(agent) : Optional.empty();
-        this.replyToType = destination instanceof Topic ? AqDestinationType.TOPIC : AqDestinationType.QUEUE;
         this.timestamp = OptionalLong.of(message.getJMSTimestamp());
         this.expiration = OptionalLong.of(message.getJMSExpiration());
         this.priority = OptionalInt.of(message.getJMSPriority());
@@ -249,6 +256,7 @@ public final class AqMessage<T> implements Message<T> {
 
     /**
      * Detached reply-to destination name.
+     * Oracle destination names retain their owning schema.
      *
      * @return destination
      */

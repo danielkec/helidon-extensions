@@ -252,7 +252,7 @@ class AqTransportLifecycleTest {
         TextMessage nativeMessage = message();
         when(client.consumer().receive(100)).thenAnswer(_ -> {
             receiving.countDown();
-            release.await();
+            awaitIgnoringInterruption(release);
             return nativeMessage;
         });
         ConnectorDelivery delivery = mock(ConnectorDelivery.class);

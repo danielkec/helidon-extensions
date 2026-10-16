@@ -18,6 +18,7 @@ package io.helidon.extensions.messaging.tests.aq;
 
 import java.io.StringReader;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -26,6 +27,7 @@ import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import javax.jms.Connection;
@@ -39,6 +41,11 @@ import io.helidon.common.GenericType;
 import io.helidon.common.media.type.MediaTypes;
 import io.helidon.config.Config;
 import io.helidon.extensions.messaging.connectors.aq.AqAdt;
+import io.helidon.extensions.messaging.connectors.aq.AqBlob;
+import io.helidon.extensions.messaging.connectors.aq.AqClob;
+import io.helidon.extensions.messaging.connectors.aq.AqConnector;
+import io.helidon.extensions.messaging.connectors.aq.AqDestinationType;
+import io.helidon.extensions.messaging.connectors.aq.AqIncomingConfig;
 import io.helidon.extensions.messaging.connectors.aq.AqMessage;
 import io.helidon.extensions.messaging.connectors.aq.AqRecipient;
 import io.helidon.extensions.messaging.connectors.aq.AqXml;
@@ -47,6 +54,8 @@ import io.helidon.messaging.BatchItemStatus;
 import io.helidon.messaging.ConsumerRegistration;
 import io.helidon.messaging.Message;
 import io.helidon.messaging.MessageBatch;
+import io.helidon.messaging.MessagingChannel;
+import io.helidon.messaging.MessagingGraph;
 import io.helidon.messaging.MessagingRuntime;
 import io.helidon.service.registry.DescriptorHandler;
 import io.helidon.service.registry.ServiceDescriptor;
@@ -160,6 +169,44 @@ class AqConnectorIT {
     }
 
     @Test
+    void queueReplyToSurvivesReceiveAndForwarding() throws Exception {
+        verifyReplyTo("TEXT_QUEUE", AqDestinationType.QUEUE);
+    }
+
+    @Test
+    void topicReplyToSurvivesReceiveAndForwarding() throws Exception {
+        verifyReplyTo("DURABLE_QUEUE", AqDestinationType.TOPIC);
+    }
+
+    @Test
+    void longIdleReceiveDrainsBeforeItsReceiveTimeout() throws Exception {
+        AtomicInteger received = new AtomicInteger();
+        var connector = AqConnector.builder()
+                .name("idle-aq")
+                .dataSource(database.dataSource())
+                .schema(database.schema())
+                .destination("IDLE_QUEUE")
+                .receiveTimeout(Duration.ofSeconds(30))
+                .closeTimeout(Duration.ofSeconds(2))
+                .build();
+        var incoming = connector.incoming(AqIncomingConfig.builder()
+                                                   .connector("idle-aq")
+                                                   .channelName("idle")
+                                                   .build());
+        var channel = MessagingChannel.create("idle", String.class);
+        try (var graph = MessagingGraph.builder()
+                .shutdownTimeout(Duration.ofMillis(500))
+                .channel(channel)
+                .incomingChannel(channel, incoming)
+                .payloadSink(channel, _ -> received.incrementAndGet())
+                .build()) {
+            graph.start();
+            database.awaitDequeue();
+        }
+        assertThat(received.get(), is(0));
+    }
+
+    @Test
     void bytesRoundTripIsDetachedFromSender() throws Exception {
         Receiver receiver = new Receiver();
         ServiceRegistryManager manager = runtime("BYTES_QUEUE", "", "", receiver);
@@ -253,6 +300,35 @@ class AqConnectorIT {
     }
 
     @Test
+    void adtLobValuesSurviveReceiveAndForwarding() throws Exception {
+        Receiver receiver = new Receiver();
+        ServiceRegistryManager manager = runtime("LOB_QUEUE", "payload-type: ADT", "", receiver);
+        messaging(manager).emit("outgoing", AqMessage.create(lobValue()));
+        AqMessage<?> first = receiver.await();
+        assertLobValue((AqAdt) first.entity());
+
+        messaging(manager).emit("outgoing", first);
+        assertLobValue((AqAdt) receiver.await().entity());
+    }
+
+    @Test
+    void nestedAdtLobValuesSurviveReceiveAndForwarding() throws Exception {
+        Receiver receiver = new Receiver();
+        ServiceRegistryManager manager = runtime("NESTED_LOB_QUEUE", "payload-type: ADT", "", receiver);
+        AqAdt child = lobValue();
+        AqAdt array = AqAdt.builder().typeName(database.schema() + ".AQ_TEST_LOB_ARRAY")
+                .kind(AqAdt.Kind.ARRAY).addAttribute(child).build();
+        AqAdt parent = AqAdt.builder().typeName(database.schema() + ".AQ_TEST_NESTED_LOBS")
+                .addAttribute(child).addAttribute(array).build();
+        messaging(manager).emit("outgoing", AqMessage.create(parent));
+        AqMessage<?> first = receiver.await();
+        assertNestedLobValue((AqAdt) first.entity());
+
+        messaging(manager).emit("outgoing", first);
+        assertNestedLobValue((AqAdt) receiver.await().entity());
+    }
+
+    @Test
     @EnabledIfSystemProperty(named = "aq.test.xml", matches = "true")
     void xmlTypeRoundTripRetainsXmlContent() throws Exception {
         Receiver receiver = new Receiver();
@@ -309,6 +385,53 @@ class AqConnectorIT {
 
     private static MessagingRuntime messaging(ServiceRegistryManager manager) {
         return manager.registry().get(MessagingRuntime.class);
+    }
+
+    private static void assertLobValue(AqAdt value) {
+        assertThat(value.attributes().get(0), instanceOf(AqBlob.class));
+        assertThat(((AqBlob) value.attributes().get(0)).bytes(), is(new byte[] {0, 1, 2, (byte) 255}));
+        assertThat(value.attributes().get(1), instanceOf(AqClob.class));
+        AqClob text = (AqClob) value.attributes().get(1);
+        assertThat(text.text(), is("LOB content"));
+        assertThat(text.national(), is(false));
+        AqClob national = (AqClob) value.attributes().get(2);
+        assertThat(national.text(), is("národní 漢字"));
+        assertThat(national.national(), is(true));
+    }
+
+    private static void assertNestedLobValue(AqAdt value) {
+        assertLobValue((AqAdt) value.attributes().get(0));
+        AqAdt array = (AqAdt) value.attributes().get(1);
+        assertThat(array.kind(), is(AqAdt.Kind.ARRAY));
+        assertThat(array.attributes().size(), is(1));
+        assertLobValue((AqAdt) array.attributes().getFirst());
+    }
+
+    private void verifyReplyTo(String destination, AqDestinationType type) throws Exception {
+        Receiver receiver = new Receiver();
+        ServiceRegistryManager manager = runtime("TEXT_QUEUE", "", "", receiver);
+        String replyTo = database.schema() + "." + destination;
+        messaging(manager).emit("outgoing", AqMessage.builder("request")
+                .replyTo(replyTo)
+                .replyToType(type)
+                .build());
+        AqMessage<?> first = receiver.await();
+        assertThat(first.replyTo(), is(Optional.of(replyTo)));
+        assertThat(first.replyToType(), is(type));
+
+        messaging(manager).emit("outgoing", first);
+        AqMessage<?> forwarded = receiver.await();
+        assertThat(forwarded.entity(), is("request"));
+        assertThat(forwarded.replyTo(), is(Optional.of(replyTo)));
+        assertThat(forwarded.replyToType(), is(type));
+    }
+
+    private AqAdt lobValue() {
+        return AqAdt.builder().typeName(database.schema() + ".AQ_TEST_LOBS")
+                .addAttribute(AqBlob.builder().bytes(new byte[] {0, 1, 2, (byte) 255}).build())
+                .addAttribute(AqClob.builder().text("LOB content").build())
+                .addAttribute(AqClob.builder().text("národní 漢字").national(true).build())
+                .build();
     }
 
     private ServiceRegistryManager runtime(String queue, String options, String incomingOptions, Receiver receiver) {

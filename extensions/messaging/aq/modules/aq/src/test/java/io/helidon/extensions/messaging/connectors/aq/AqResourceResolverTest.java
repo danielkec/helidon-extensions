@@ -17,12 +17,19 @@
 package io.helidon.extensions.messaging.connectors.aq;
 
 import java.util.Optional;
+import java.util.Set;
 
 import javax.jms.ConnectionFactory;
 import javax.sql.DataSource;
 
+import io.helidon.common.types.ResolvedType;
+import io.helidon.common.types.TypeName;
 import io.helidon.messaging.MessagingException;
+import io.helidon.service.registry.Qualifier;
+import io.helidon.service.registry.ServiceDescriptor;
 import io.helidon.service.registry.ServiceRegistry;
+import io.helidon.service.registry.ServiceRegistryConfig;
+import io.helidon.service.registry.ServiceRegistryManager;
 
 import oracle.jms.AQjmsConnectionFactory;
 import org.junit.jupiter.api.Test;
@@ -106,14 +113,73 @@ class AqResourceResolverTest {
     @Test
     void testDefaultDataSourcePrecedesDefaultFactory() {
         DataSource source = mock(DataSource.class);
-        ServiceRegistry registry = mock(ServiceRegistry.class);
-        when(registry.first(DataSource.class)).thenReturn(Optional.of(source));
+        ConnectionFactory factory = mock(ConnectionFactory.class);
         var config = config(AqConnectorConfig.builder().name("aq").buildPrototype());
+        var manager = ServiceRegistryManager.create(registryConfig()
+                .putContractInstance(DataSource.class, source)
+                .putContractInstance(ConnectionFactory.class, factory)
+                .build());
+        try {
+            assertThat(new AqResourceResolver(manager.registry()).resolve(config), instanceOf(AQjmsConnectionFactory.class));
+            verifyZeroInteractions(source, factory);
+        } finally {
+            manager.shutdown();
+        }
+    }
 
-        assertThat(new AqResourceResolver(registry).resolve(config), instanceOf(AQjmsConnectionFactory.class));
-        verify(registry).first(DataSource.class);
-        verifyNoMoreInteractions(registry);
-        verifyZeroInteractions(source);
+    @Test
+    void testNamedDataSourceDoesNotInterceptDefaultFactory() {
+        DataSource analytics = mock(DataSource.class);
+        ConnectionFactory factory = mock(ConnectionFactory.class);
+        var manager = ServiceRegistryManager.create(registryConfig()
+                .putContractInstance(ConnectionFactory.class, factory)
+                .putServiceInstance(new NamedDescriptor<>(DataSource.class, "analytics"), analytics)
+                .build());
+        try {
+            var config = config(AqConnectorConfig.builder().name("aq").buildPrototype());
+            assertThat(new AqResourceResolver(manager.registry()).resolve(config), sameInstance(factory));
+            verifyZeroInteractions(analytics, factory);
+        } finally {
+            manager.shutdown();
+        }
+    }
+
+    @Test
+    void testNamedDataSourceRequiresExplicitSelection() {
+        DataSource analytics = mock(DataSource.class);
+        var manager = ServiceRegistryManager.create(registryConfig()
+                .putServiceInstance(new NamedDescriptor<>(DataSource.class, "analytics"), analytics)
+                .build());
+        try {
+            var resolver = new AqResourceResolver(manager.registry());
+            var defaults = config(AqConnectorConfig.builder().name("aq").buildPrototype());
+            assertThrows(MessagingException.class, () -> resolver.resolve(defaults));
+
+            var named = config(AqConnectorConfig.builder().name("aq").dataSourceName("analytics").buildPrototype());
+            assertThat(resolver.resolve(named), instanceOf(AQjmsConnectionFactory.class));
+            verifyZeroInteractions(analytics);
+        } finally {
+            manager.shutdown();
+        }
+    }
+
+    @Test
+    void testNamedFactoryRequiresExplicitSelection() {
+        ConnectionFactory factory = mock(ConnectionFactory.class);
+        var manager = ServiceRegistryManager.create(registryConfig()
+                .putServiceInstance(new NamedDescriptor<>(ConnectionFactory.class, "orders"), factory)
+                .build());
+        try {
+            var resolver = new AqResourceResolver(manager.registry());
+            var defaults = config(AqConnectorConfig.builder().name("aq").buildPrototype());
+            assertThrows(MessagingException.class, () -> resolver.resolve(defaults));
+
+            var named = config(AqConnectorConfig.builder().name("aq").connectionFactoryName("orders").buildPrototype());
+            assertThat(resolver.resolve(named), sameInstance(factory));
+            verifyZeroInteractions(factory);
+        } finally {
+            manager.shutdown();
+        }
     }
 
     @Test
@@ -134,5 +200,39 @@ class AqResourceResolverTest {
                 .channelName("orders")
                 .destination("ORDERS")
                 .build());
+    }
+
+    private static ServiceRegistryConfig.Builder registryConfig() {
+        return ServiceRegistryConfig.builder().discoverServices(false).discoverServicesFromServiceLoader(false);
+    }
+
+    private static final class NamedDescriptor<T> implements ServiceDescriptor<T> {
+        private final Class<T> contract;
+        private final String name;
+
+        private NamedDescriptor(Class<T> contract, String name) {
+            this.contract = contract;
+            this.name = name;
+        }
+
+        @Override
+        public TypeName serviceType() {
+            return TypeName.create(AqResourceResolverTest.class.getName() + "." + name);
+        }
+
+        @Override
+        public TypeName descriptorType() {
+            return TypeName.create(NamedDescriptor.class);
+        }
+
+        @Override
+        public Set<ResolvedType> contracts() {
+            return Set.of(ResolvedType.create(contract));
+        }
+
+        @Override
+        public Set<Qualifier> qualifiers() {
+            return Set.of(Qualifier.createNamed(name));
+        }
     }
 }
