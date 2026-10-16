@@ -50,6 +50,7 @@ import dev.langchain4j.exception.HttpException;
 import dev.langchain4j.http.client.HttpClient;
 import dev.langchain4j.http.client.HttpRequest;
 import dev.langchain4j.http.client.SuccessfulHttpResponse;
+import dev.langchain4j.http.client.sse.HttpErrorResponseReceived;
 import dev.langchain4j.http.client.sse.HttpResponseReceived;
 import dev.langchain4j.http.client.sse.HttpStreamingEvent;
 import dev.langchain4j.http.client.sse.ServerSentEvent;
@@ -535,6 +536,19 @@ public final class HelidonHttpClient implements HttpClient, AutoCloseable, Runti
                 }
                 int status = response.status().code();
                 if (status < 200 || status >= 300) {
+                    boolean emitHead;
+                    demandLock.lock();
+                    try {
+                        emitHead = demand > 0;
+                    } finally {
+                        demandLock.unlock();
+                    }
+                    if (emitHead && !emit(new HttpErrorResponseReceived(status, headers(response)))) {
+                        return;
+                    }
+                    if (cancelled()) {
+                        return;
+                    }
                     fail(new HttpException(status, errorBody(response)));
                     return;
                 }

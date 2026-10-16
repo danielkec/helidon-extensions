@@ -78,6 +78,12 @@ Supplying an existing WebClient, as above, makes ownership explicit.
 Multipart requests are outside this module's current MCP scope and are rejected explicitly.
 Configure WebClient's connect/read timeouts before passing it to the adapter.
 
+For a non-2xx response, the adapter emits `HttpErrorResponseReceived` before reading the
+error body when the subscriber has outstanding demand. MCP cancels from that event to fail
+or recover its session immediately. A consumer that ignores the event still receives the
+normal error with its diagnostic body; with no demand, the advisory is omitted and the
+terminal error remains deliverable.
+
 ## Keycloak end-to-end test
 
 The opt-in `keycloak-e2e` profile tests the complete path:

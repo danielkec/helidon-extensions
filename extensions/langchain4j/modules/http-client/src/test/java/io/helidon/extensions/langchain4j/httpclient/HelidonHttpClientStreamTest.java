@@ -40,10 +40,12 @@ import java.util.concurrent.atomic.AtomicReference;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import dev.langchain4j.exception.HttpException;
 import dev.langchain4j.http.client.HttpMethod;
 import dev.langchain4j.http.client.HttpRequest;
 import dev.langchain4j.http.client.sse.DefaultServerSentEventParser;
 import dev.langchain4j.http.client.sse.DefaultServerSentEventParsingHandle;
+import dev.langchain4j.http.client.sse.HttpErrorResponseReceived;
 import dev.langchain4j.http.client.sse.HttpResponseReceived;
 import dev.langchain4j.http.client.sse.HttpStreamingEvent;
 import dev.langchain4j.http.client.sse.ServerSentEvent;
@@ -483,6 +485,67 @@ class HelidonHttpClientStreamTest {
         assertThat(callbacks, is(List.of("open", "event")));
     }
 
+    @Test
+    void errorHeadCancellationStopsWorkerBeforeErrorBodyEnds() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        startErrorServer(release, new CountDownLatch(1));
+        startClient();
+        RecordingSubscriber subscriber = new RecordingSubscriber(1, true);
+        try {
+            client.stream(request("/error"), new DefaultServerSentEventParser()).subscribe(subscriber);
+            HttpErrorResponseReceived head = (HttpErrorResponseReceived) subscriber.next();
+            assertThat(head.statusCode(), is(401));
+            assertThat(head.headers().get("www-authenticate"), is(List.of("Bearer realm=\"test\"")));
+            Thread worker = workerThread.get();
+            assertThat(worker, notNullValue());
+            assertThat(worker.join(Duration.ofSeconds(5)), is(true));
+            assertThat("server error body is still open", release.getCount(), is(1L));
+            assertThat(subscriber.failure.get(), is((Throwable) null));
+            assertThat(subscriber.events.isEmpty(), is(true));
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void ignoredErrorHeadPreservesFullBodyWithoutAdditionalDemand() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        startErrorServer(release, new CountDownLatch(1));
+        startClient();
+        RecordingSubscriber subscriber = new RecordingSubscriber(1, false);
+        try {
+            client.stream(request("/error"), new DefaultServerSentEventParser()).subscribe(subscriber);
+            assertThat(subscriber.next() instanceof HttpErrorResponseReceived, is(true));
+            assertThat(subscriber.failure.get(), is((Throwable) null));
+            release.countDown();
+            HttpException error = (HttpException) subscriber.next();
+            assertThat(error.statusCode(), is(401));
+            assertThat(error.getMessage(), is("denied: details"));
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void zeroDemandStillReceivesTerminalErrorWithoutAdvisory() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch headersSent = new CountDownLatch(1);
+        startErrorServer(release, headersSent);
+        startClient();
+        RecordingSubscriber subscriber = new RecordingSubscriber();
+        try {
+            client.stream(request("/error"), new DefaultServerSentEventParser()).subscribe(subscriber);
+            assertThat(headersSent.await(5, TimeUnit.SECONDS), is(true));
+            release.countDown();
+            HttpException error = (HttpException) subscriber.next();
+            assertThat(error.statusCode(), is(401));
+            assertThat(error.getMessage(), is("denied: details"));
+            assertThat(subscriber.events.isEmpty(), is(true));
+        } finally {
+            release.countDown();
+        }
+    }
+
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(status, bytes.length);
@@ -540,6 +603,23 @@ class HelidonHttpClientStreamTest {
             }
         });
         server.start();
+    }
+
+    private void startErrorServer(CountDownLatch release, CountDownLatch headersSent) throws IOException {
+        startServer(exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().set("WWW-Authenticate", "Bearer realm=\"test\"");
+            exchange.sendResponseHeaders(401, 0);
+            try (var output = exchange.getResponseBody()) {
+                output.write("denied".getBytes(StandardCharsets.UTF_8));
+                output.flush();
+                headersSent.countDown();
+                await(release);
+                output.write(": details".getBytes(StandardCharsets.UTF_8));
+            } catch (IOException _) {
+                // Cancellation from the error-head callback may already have closed this connection.
+            }
+        });
     }
 
     private void startClient() {
@@ -641,6 +721,8 @@ class HelidonHttpClientStreamTest {
         private final BlockingQueue<Object> events = new LinkedBlockingQueue<>();
         private final AtomicReference<Throwable> failure = new AtomicReference<>();
         private final boolean invalidOnSubscribe;
+        private final long initialDemand;
+        private final boolean cancelOnErrorHead;
         private Flow.Subscription subscription;
 
         private RecordingSubscriber() {
@@ -649,6 +731,14 @@ class HelidonHttpClientStreamTest {
 
         private RecordingSubscriber(boolean invalidOnSubscribe) {
             this.invalidOnSubscribe = invalidOnSubscribe;
+            this.initialDemand = 0;
+            this.cancelOnErrorHead = false;
+        }
+
+        private RecordingSubscriber(long initialDemand, boolean cancelOnErrorHead) {
+            this.invalidOnSubscribe = false;
+            this.initialDemand = initialDemand;
+            this.cancelOnErrorHead = cancelOnErrorHead;
         }
 
         @Override
@@ -656,12 +746,17 @@ class HelidonHttpClientStreamTest {
             this.subscription = subscription;
             if (invalidOnSubscribe) {
                 subscription.request(0);
+            } else if (initialDemand > 0) {
+                subscription.request(initialDemand);
             }
         }
 
         @Override
         public void onNext(HttpStreamingEvent item) {
             events.add(item);
+            if (cancelOnErrorHead && item instanceof HttpErrorResponseReceived) {
+                subscription.cancel();
+            }
         }
 
         @Override
