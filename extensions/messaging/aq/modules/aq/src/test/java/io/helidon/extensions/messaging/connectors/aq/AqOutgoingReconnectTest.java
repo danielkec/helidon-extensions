@@ -19,6 +19,7 @@ package io.helidon.extensions.messaging.connectors.aq;
 import java.sql.Blob;
 import java.sql.SQLRecoverableException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
@@ -51,6 +52,7 @@ import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.lessThan;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -261,7 +263,182 @@ class AqOutgoingReconnectTest {
     }
 
     @Test
-    void closeCancelsAWaitingSendAndRecoveryBackoff() throws Exception {
+    void concurrentSendersHaveIndependentRecoveryWaitTimeouts() throws Exception {
+        Client original = client(false);
+        Client replacement = client(false);
+        ConnectionFactory factory = factory(original, replacement);
+        CountDownLatch connecting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(factory.createConnection()).thenReturn(original.connection()).thenAnswer(_ -> {
+            connecting.countDown();
+            release.await();
+            return replacement.connection();
+        });
+        doThrow(connectionFailure()).when(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+        AqOutgoingChannel channel = channel(config(factory, false)
+                                                    .reconnect(reconnect().waitTimeout(Duration.ofMillis(500)).build())
+                                                    .buildPrototype());
+        CountDownLatch ready = new CountDownLatch(4);
+        CountDownLatch start = new CountDownLatch(1);
+        List<FutureTask<Long>> sends = new ArrayList<>();
+        List<Thread> senders = new ArrayList<>();
+        channel.start();
+        try {
+            assertThrows(BatchDeliveryException.class, () -> channel.sendBatch(batch("first")));
+            assertThat(connecting.await(2, TimeUnit.SECONDS), is(true));
+            for (int i = 0; i < 4; i++) {
+                MessageBatch<String> pending = batch("pending-" + i, "tail-" + i);
+                FutureTask<Long> send = new FutureTask<>(() -> {
+                    ready.countDown();
+                    start.await();
+                    long started = System.nanoTime();
+                    BatchDeliveryException failure = assertThrows(BatchDeliveryException.class,
+                                                                 () -> channel.sendBatch(pending));
+                    long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                    assertThat(failure.batch(), sameInstance(pending));
+                    assertThat(failure.getCause().getMessage(), containsString("Timed out waiting for AQ connection recovery"));
+                    assertThat(failure.outcome(0).status(), is(BatchItemStatus.NOT_ATTEMPTED));
+                    assertThat(failure.outcome(1).status(), is(BatchItemStatus.NOT_ATTEMPTED));
+                    return elapsed;
+                });
+                sends.add(send);
+                senders.add(Thread.ofVirtual().start(send));
+            }
+            assertThat(ready.await(2, TimeUnit.SECONDS), is(true));
+            start.countDown();
+            for (FutureTask<Long> send : sends) {
+                assertThat("Each caller has its own recovery wait budget", send.get(3, TimeUnit.SECONDS), lessThan(1500L));
+            }
+            verify(original.session(), times(1)).createTextMessage(anyString());
+            verify(original.producer(), times(1)).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+            verify(replacement.session(), never()).createTextMessage(anyString());
+            verify(replacement.producer(), never()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+            release.countDown();
+            channel.sendBatch(batch("next"));
+            verifyReplacementOnlySentNext(replacement);
+        } finally {
+            start.countDown();
+            release.countDown();
+            channel.forceClose();
+            for (Thread sender : senders) {
+                sender.join(Duration.ofSeconds(2));
+                assertThat(sender.isAlive(), is(false));
+            }
+            channel.close();
+        }
+    }
+
+    @Test
+    void queuedSendUsesReplacementWhenTheActiveSendRetiresItsConnection() throws Exception {
+        Client original = client(false);
+        Client replacement = client(false);
+        ConnectionFactory factory = factory(original, replacement);
+        CountDownLatch sending = new CountDownLatch(1);
+        CountDownLatch failSend = new CountDownLatch(1);
+        CountDownLatch connecting = new CountDownLatch(1);
+        CountDownLatch releaseConnection = new CountDownLatch(1);
+        when(factory.createConnection()).thenReturn(original.connection()).thenAnswer(_ -> {
+            connecting.countDown();
+            releaseConnection.await();
+            return replacement.connection();
+        });
+        doAnswer(_ -> {
+            sending.countDown();
+            failSend.await();
+            throw connectionFailure();
+        }).when(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+        AqOutgoingChannel channel = channel(config(factory, false).buildPrototype());
+        channel.start();
+        FutureTask<BatchDeliveryException> first = new FutureTask<>(() -> assertThrows(BatchDeliveryException.class,
+                                                                                    () -> channel.sendBatch(batch("first"))));
+        FutureTask<Void> next = new FutureTask<>(() -> {
+            channel.sendBatch(batch("next"));
+            return null;
+        });
+        Thread firstSender = Thread.ofVirtual().start(first);
+        Thread nextSender = null;
+        try {
+            assertThat(sending.await(2, TimeUnit.SECONDS), is(true));
+            nextSender = Thread.ofVirtual().start(next);
+            assertThrows(TimeoutException.class, () -> next.get(100, TimeUnit.MILLISECONDS));
+            failSend.countDown();
+            assertThat(first.get(2, TimeUnit.SECONDS).outcome(0).status(), is(BatchItemStatus.INDETERMINATE));
+            assertThat(connecting.await(2, TimeUnit.SECONDS), is(true));
+            assertThrows(TimeoutException.class, () -> next.get(100, TimeUnit.MILLISECONDS));
+            verify(original.session(), never()).createTextMessage("next");
+            releaseConnection.countDown();
+            next.get(2, TimeUnit.SECONDS);
+
+            verify(original.producer(), times(1)).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+            verifyReplacementOnlySentNext(replacement);
+            verify(original.connection()).close();
+        } finally {
+            failSend.countDown();
+            releaseConnection.countDown();
+            channel.forceClose();
+            firstSender.join(Duration.ofSeconds(2));
+            if (nextSender != null) {
+                nextSender.join(Duration.ofSeconds(2));
+                assertThat(nextSender.isAlive(), is(false));
+            }
+            channel.close();
+        }
+        assertThat(firstSender.isAlive(), is(false));
+    }
+
+    @Test
+    void healthyNativeSendSerializationIsNotLimitedByRecoveryWaitTimeout() throws Exception {
+        Client original = client(false);
+        ConnectionFactory factory = factory(original, client(false));
+        CountDownLatch sending = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            if ("first".equals(((TextMessage) invocation.getArgument(0)).getText())) {
+                sending.countDown();
+                release.await();
+            }
+            return null;
+        }).when(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+        AqOutgoingChannel channel = channel(config(factory, false)
+                                                    .reconnect(reconnect().waitTimeout(Duration.ofMillis(100)).build())
+                                                    .buildPrototype());
+        channel.start();
+        FutureTask<Void> first = new FutureTask<>(() -> {
+            channel.sendBatch(batch("first"));
+            return null;
+        });
+        FutureTask<Void> next = new FutureTask<>(() -> {
+            channel.sendBatch(batch("next"));
+            return null;
+        });
+        Thread firstSender = Thread.ofVirtual().start(first);
+        Thread nextSender = null;
+        try {
+            assertThat(sending.await(2, TimeUnit.SECONDS), is(true));
+            nextSender = Thread.ofVirtual().start(next);
+            assertThrows(TimeoutException.class, () -> next.get(250, TimeUnit.MILLISECONDS));
+            release.countDown();
+            first.get(2, TimeUnit.SECONDS);
+            next.get(2, TimeUnit.SECONDS);
+
+            verify(factory, times(1)).createConnection();
+            verify(original.session()).createTextMessage("next");
+            verify(original.producer(), times(2)).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+        } finally {
+            release.countDown();
+            channel.forceClose();
+            firstSender.join(Duration.ofSeconds(2));
+            if (nextSender != null) {
+                nextSender.join(Duration.ofSeconds(2));
+                assertThat(nextSender.isAlive(), is(false));
+            }
+            channel.close();
+        }
+        assertThat(firstSender.isAlive(), is(false));
+    }
+
+    @Test
+    void closeCancelsConcurrentWaitingSendsAndRecoveryBackoff() throws Exception {
         Client original = client(false);
         Client replacement = client(false);
         ConnectionFactory factory = factory(original, replacement);
@@ -273,24 +450,39 @@ class AqOutgoingReconnectTest {
                                                     .buildPrototype());
         channel.start();
         assertThrows(BatchDeliveryException.class, () -> channel.sendBatch(batch("first")));
-        FutureTask<BatchDeliveryException> send = new FutureTask<>(() -> assertThrows(BatchDeliveryException.class,
-                                                                                   () -> channel.sendBatch(batch("next"))));
-        Thread sender = Thread.ofVirtual().start(send);
+        List<FutureTask<BatchDeliveryException>> sends = new ArrayList<>();
+        List<Thread> senders = new ArrayList<>();
         try {
-            assertThrows(TimeoutException.class, () -> send.get(100, TimeUnit.MILLISECONDS));
+            for (int i = 0; i < 4; i++) {
+                MessageBatch<String> pending = batch("pending-" + i);
+                FutureTask<BatchDeliveryException> send = new FutureTask<>(() -> {
+                    BatchDeliveryException failure = assertThrows(BatchDeliveryException.class,
+                                                                 () -> channel.sendBatch(pending));
+                    assertThat(failure.batch(), sameInstance(pending));
+                    return failure;
+                });
+                sends.add(send);
+                senders.add(Thread.ofVirtual().start(send));
+            }
+            for (FutureTask<BatchDeliveryException> send : sends) {
+                assertThrows(TimeoutException.class, () -> send.get(100, TimeUnit.MILLISECONDS));
+            }
             channel.close();
-            BatchDeliveryException failure = send.get(1, TimeUnit.SECONDS);
-
-            assertThat(failure.outcome(0).status(), is(BatchItemStatus.NOT_ATTEMPTED));
+            for (FutureTask<BatchDeliveryException> send : sends) {
+                BatchDeliveryException failure = send.get(1, TimeUnit.SECONDS);
+                assertThat(failure.outcome(0).status(), is(BatchItemStatus.NOT_ATTEMPTED));
+            }
             verify(factory, times(1)).createConnection();
             verify(original.connection()).close();
             assertThrows(MessagingException.class, () -> channel.sendBatch(batch("after-close")));
         } finally {
             channel.forceClose();
-            sender.join(Duration.ofSeconds(2));
+            for (Thread sender : senders) {
+                sender.join(Duration.ofSeconds(2));
+                assertThat(sender.isAlive(), is(false));
+            }
             channel.close();
         }
-        assertThat(sender.isAlive(), is(false));
     }
 
     @Test

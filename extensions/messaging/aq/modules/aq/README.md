@@ -171,6 +171,8 @@ An outgoing connection failure fails the current send with its original per-mess
 not replay that send. A later send waits up to `reconnect.wait-timeout` for recovery; if no connection becomes available,
 it reports every item as not attempted and the channel continues recovering. An uncertain enqueue or commit remains
 indeterminate. The caller or the incoming channel's Messaging failure policy decides whether to retry the failed message.
+Concurrent sends wait for recovery independently, using one timeout budget per call. Native message creation and
+sending remain serialized, and each caller rechecks the connection after obtaining its turn to send.
 
 An incoming connection failure resumes receiving after recovery. If processing already finished but its commit or
 acknowledgment could not be confirmed, the old session is abandoned and Oracle determines whether to redeliver the

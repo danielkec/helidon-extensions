@@ -17,6 +17,7 @@
 package io.helidon.extensions.messaging.connectors.aq;
 
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -80,36 +81,38 @@ final class AqOutgoingChannel implements OutgoingChannel {
     @Override
     public void sendBatch(MessageBatch<?> batch) {
         Objects.requireNonNull(batch);
-        acquireSendLock();
-        try {
-            requireAccepting();
-            requireOpen();
-            if (!started.get()) {
-                throw new IllegalStateException("AQ outgoing channel has not been started");
-            }
-            sender.set(Thread.currentThread());
-            AqResources generation;
+        requireAccepting();
+        requireOpen();
+        if (!started.get()) {
+            throw new IllegalStateException("AQ outgoing channel has not been started");
+        }
+        long startedAt = System.nanoTime();
+        long timeout = TimeUnit.NANOSECONDS.convert(config.reconnect().waitTimeout());
+        while (true) {
+            AqResources generation = awaitReady(batch, startedAt, timeout);
+            acquireSendLock();
             try {
-                generation = resources.awaitReady(config.reconnect().waitTimeout());
-            } catch (MessagingException failure) {
-                List<BatchItemOutcome> outcomes = new ArrayList<>(batch.size());
-                for (int i = 0; i < batch.size(); i++) {
-                    outcomes.add(BatchItemOutcome.notAttempted(i));
+                requireAccepting();
+                requireOpen();
+                // Another batch can retire this generation while we wait for the session.
+                if (!resources.current(generation)) {
+                    continue;
                 }
-                throw new BatchDeliveryException("AQ connection is unavailable", failure, batch, outcomes);
+                sender.set(Thread.currentThread());
+                if (config.transacted()) {
+                    sendTransacted(generation, batch);
+                } else {
+                    sendIndividual(generation, batch);
+                }
+                return;
+            } catch (Error failure) {
+                // An unexpected fatal failure must not leave an uncommitted session available for another send.
+                forceClose();
+                throw failure;
+            } finally {
+                sender.set(null);
+                sendLock.unlock();
             }
-            if (config.transacted()) {
-                sendTransacted(generation, batch);
-            } else {
-                sendIndividual(generation, batch);
-            }
-        } catch (Error failure) {
-            // An unexpected fatal failure must not leave an uncommitted session available for another send.
-            forceClose();
-            throw failure;
-        } finally {
-            sender.set(null);
-            sendLock.unlock();
         }
     }
 
@@ -296,6 +299,19 @@ final class AqOutgoingChannel implements OutgoingChannel {
             }
         } else if (terminalFailure) {
             forceClose();
+        }
+    }
+
+    private AqResources awaitReady(MessageBatch<?> batch, long startedAt, long timeout) {
+        long remaining = Math.max(0, timeout - (System.nanoTime() - startedAt));
+        try {
+            return resources.awaitReady(Duration.ofNanos(remaining));
+        } catch (MessagingException failure) {
+            List<BatchItemOutcome> outcomes = new ArrayList<>(batch.size());
+            for (int i = 0; i < batch.size(); i++) {
+                outcomes.add(BatchItemOutcome.notAttempted(i));
+            }
+            throw new BatchDeliveryException("AQ connection is unavailable", failure, batch, outcomes);
         }
     }
 

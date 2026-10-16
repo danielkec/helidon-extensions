@@ -85,7 +85,7 @@ final class AqResourceManager implements AutoCloseable {
     }
 
     AqResources awaitReady(Duration timeout) {
-        long remaining = timeout == null ? 0 : TimeUnit.MILLISECONDS.toNanos(timeout.toMillis());
+        long remaining = timeout == null ? 0 : TimeUnit.NANOSECONDS.convert(timeout);
         lock.lock();
         try {
             while (true) {
@@ -115,6 +115,15 @@ final class AqResourceManager implements AutoCloseable {
                     throw new MessagingException("Interrupted waiting for AQ connection recovery", e);
                 }
             }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    boolean current(AqResources generation) {
+        lock.lock();
+        try {
+            return !stopped && !closed && current == generation;
         } finally {
             lock.unlock();
         }
