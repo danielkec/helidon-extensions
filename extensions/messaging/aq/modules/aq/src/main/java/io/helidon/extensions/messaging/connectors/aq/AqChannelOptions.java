@@ -154,4 +154,13 @@ interface AqChannelOptions {
      */
     @Option.Configured
     Optional<Duration> closeTimeout();
+
+    /**
+     * Connection recovery settings. Absent channel settings inherit the complete connector policy.
+     * Recovery is enabled by default.
+     *
+     * @return connection recovery settings
+     */
+    @Option.Configured
+    Optional<AqReconnectConfig> reconnect();
 }

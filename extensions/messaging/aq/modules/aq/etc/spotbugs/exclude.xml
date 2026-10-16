@@ -29,4 +29,11 @@
         <Bug pattern="OBJECT_DESERIALIZATION"/>
     </Match>
 
+    <Match>
+        <!-- Backoff jitter only spreads connection attempts; it does not generate security-sensitive values. -->
+        <Class name="io.helidon.extensions.messaging.connectors.aq.AqResourceManager"/>
+        <Method name="pause"/>
+        <Bug pattern="PREDICTABLE_RANDOM"/>
+    </Match>
+
 </FindBugsFilter>

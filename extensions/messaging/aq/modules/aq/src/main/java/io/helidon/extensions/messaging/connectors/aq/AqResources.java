@@ -133,6 +133,17 @@ final class AqResources implements AutoCloseable {
         }
     }
 
+    void awaitCleanup() {
+        try {
+            terminated.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new MessagingException("Interrupted while retiring AQ channel " + config.channelName(), e);
+        } catch (ExecutionException _) {
+            // A broken connection can report a close failure after all cleanup has completed.
+        }
+    }
+
     @Override
     public void close() {
         forceClose();
@@ -298,11 +309,14 @@ final class AqResources implements AutoCloseable {
 
     private void awaitReady() {
         try {
-            ready.get();
+            ready.get(config.reconnect().connectTimeout().toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             forceClose();
             Thread.currentThread().interrupt();
             throw new MessagingException("Interrupted while starting AQ channel " + config.channelName(), e);
+        } catch (TimeoutException e) {
+            forceClose();
+            throw new AqConnectionTimeoutException("Timed out connecting AQ channel " + config.channelName(), e);
         } catch (ExecutionException e) {
             if (e.getCause() instanceof RuntimeException failure) {
                 throw failure;

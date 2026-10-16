@@ -156,10 +156,52 @@ are individually visible. A batch is not a transaction across multiple outgoing 
 outputs remain visible if another output fails.
 
 Shutdown drains active processing before releasing channel resources. A configured timeout bounds graceful
-cleanup; interrupted or abandoned deliveries remain unsettled. Database connection failures currently stop
-the affected source or fail the send; automatic reconnect and replay are not implemented in this initial version.
+cleanup; interrupted or abandoned deliveries remain unsettled.
 Draining cancels an idle dequeue independently of `receive-timeout`, while an already received message is allowed
 to finish processing and settlement before its session closes.
+
+## Connection recovery
+
+Established channels reconnect automatically after recognized database or network connection failures. Recovery
+obtains a fresh connection from the same application-owned data source or connection factory and restores the AQ
+session, destination, selector, recipient or durable subscription. The data source and its pool remain open.
+Initial startup makes one connection attempt, bounded by `reconnect.connect-timeout`.
+
+An outgoing connection failure fails the current send with its original per-message outcomes. The connector does
+not replay that send. A later send waits up to `reconnect.wait-timeout` for recovery; if no connection becomes available,
+it reports every item as not attempted and the channel continues recovering. An uncertain enqueue or commit remains
+indeterminate. The caller or the incoming channel's Messaging failure policy decides whether to retry the failed message.
+
+An incoming connection failure resumes receiving after recovery. If processing already finished but its commit or
+acknowledgment could not be confirmed, the old session is abandoned and Oracle determines whether to redeliver the
+message. Processing can therefore occur more than once. Durable subscriptions retain their existing identity;
+non-durable topic subscriptions cannot recover messages published while they were disconnected.
+
+Recovery uses exponential backoff with jitter and continues until shutdown or a non-recoverable error. Invalid
+credentials, destination/configuration errors and application processing or payload conversion failures retain their
+normal error handling. Set `reconnect.enabled: false` to disable automatic recovery. Draining or closing a channel
+cancels recovery and prevents another connection attempt.
+
+```yaml
+messaging:
+  connector:
+    orders-aq:
+      type: helidon-aq
+      data-source-name: orders
+      reconnect:
+        enabled: true
+        initial-delay: PT0.1S
+        max-delay: PT30S
+        jitter: 0.2
+        connect-timeout: PT10S
+        wait-timeout: PT30S
+```
+
+The same policy is available programmatically with `.reconnect(reconnect -> reconnect.enabled(true))` and can be
+overridden as a whole on a channel. `connect-timeout` bounds waiting for resource initialization; `wait-timeout` bounds
+waiting for a recovered connection, not an in-progress database send. Configure JDBC connection/read timeouts on the
+supplied data source or factory as appropriate. If a provider ignores cancellation, recovery waits for that attempt's
+cleanup before opening another connection, and closes any late resource returned after shutdown.
 
 ## Configuration defaults
 
@@ -175,6 +217,12 @@ Settings can be declared on the connector and overridden on individual channels.
 | `allow-object-messages` | `false` |
 | `receive-timeout` | `PT0.1S` |
 | `close-timeout` | `PT10S` |
+| `reconnect.enabled` | `true`; applies after successful startup |
+| `reconnect.initial-delay` | `PT0.1S`; doubles after each failed attempt |
+| `reconnect.max-delay` | `PT30S`; includes jitter |
+| `reconnect.jitter` | `0.2`; fraction in range `0` through `1` |
+| `reconnect.connect-timeout` | `PT10S`; maximum wait for one connection attempt |
+| `reconnect.wait-timeout` | `PT30S`; maximum outgoing wait for a recovered connection |
 | `max-body-bytes` | `1048576`; bounds incoming bytes messages and each detached SQL LOB value |
 | `durable` | `false`; when true requires `subscription-name` |
 | `no-local` | `false` |
@@ -186,6 +234,8 @@ Settings can be declared on the connector and overridden on individual channels.
 
 The integration test module uses a running Oracle database and creates a uniquely named disposable schema.
 Its administrator login must be able to create/drop users, grant AQ privileges, and grant tablespace allocation.
+The lifecycle and reconnect tests also require access to `V$SESSION` and permission to terminate test-schema sessions
+with `ALTER SYSTEM`.
 The fixture provisions queues from [`schema.sql`](../../tests/aq/src/test/resources/schema.sql) and removes
 the schema afterward. It does not manage or stop the supplied database.
 
@@ -205,4 +255,6 @@ with Oracle AQ API `19.3.0.0` and JDBC/XDB `23.26.1.0.0`.
 The database suite covers JMS payloads, selectors, explicit recipient lists, ADT/XMLType payloads,
 durable subscriptions, generated `@Messaging.ReceiveFrom` handlers and injected emitters, runtime settlement,
 rollback/redelivery, and sharing an injected data source across application components and runtime shutdown.
+Reconnect tests terminate only sessions belonging to the disposable schema, then verify incoming continuation,
+uncertain-settlement redelivery, outgoing failure without hidden replay, and durable subscription/selector restoration.
 Other database releases and deployment-specific wallet/failover configurations need separate validation.

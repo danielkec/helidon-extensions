@@ -39,7 +39,7 @@ import io.helidon.messaging.spi.IncomingChannel;
  */
 final class AqIncomingChannel implements IncomingChannel {
     private final AqRuntimeConfig config;
-    private final AqResources resources;
+    private final AqResourceManager resources;
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean draining = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -56,7 +56,7 @@ final class AqIncomingChannel implements IncomingChannel {
 
     AqIncomingChannel(AqRuntimeConfig config, AqResourceResolver resolver) {
         this.config = Objects.requireNonNull(config);
-        this.resources = new AqResources(config, resolver);
+        this.resources = new AqResourceManager(config, resolver, true);
     }
 
     @Override
@@ -74,12 +74,34 @@ final class AqIncomingChannel implements IncomingChannel {
             if (context.maxDeliveryMessages() < 1) {
                 throw new MessagingException("AQ incoming channel requires capacity for one message");
             }
-            resources.open(true);
+            try {
+                resources.open();
+            } catch (RuntimeException e) {
+                if (closed.get() || draining.get()) {
+                    return;
+                }
+                throw e;
+            }
             if (!context.awaitRunning() || closed.get() || draining.get()) {
                 return;
             }
-            resources.beginReceiving();
+            AqResources receivingResources = null;
             while (!closed.get() && !draining.get()) {
+                AqResources current = resources.awaitReady();
+                if (current == null || closed.get() || draining.get()) {
+                    break;
+                }
+                if (current != receivingResources) {
+                    try {
+                        current.beginReceiving();
+                    } catch (JMSException | RuntimeException e) {
+                        if (recover(current, e)) {
+                            continue;
+                        }
+                        throw e;
+                    }
+                    receivingResources = current;
+                }
                 var available = context.tryReserveDelivery();
                 if (available.isEmpty()) {
                     if (acquisitionStopped.await(10, TimeUnit.MILLISECONDS)) {
@@ -89,7 +111,7 @@ final class AqIncomingChannel implements IncomingChannel {
                 }
                 try (var reservation = available.orElseThrow()) {
                     if (!closed.get() && !draining.get()) {
-                        receive(reservation);
+                        receive(current, reservation);
                     }
                 }
             }
@@ -134,6 +156,7 @@ final class AqIncomingChannel implements IncomingChannel {
                 return;
             }
             acquisitionStopped.countDown();
+            resources.stopRecovery();
             if (receiving) {
                 Thread running = owner.get();
                 if (!closed.get() && running != null && running != Thread.currentThread() && !running.isInterrupted()) {
@@ -186,7 +209,7 @@ final class AqIncomingChannel implements IncomingChannel {
         }
     }
 
-    private void receive(ConnectorDeliveryReservation reservation) throws JMSException {
+    private void receive(AqResources current, ConnectorDeliveryReservation reservation) throws JMSException {
         Message nativeMessage;
         deliveryLock.lock();
         try {
@@ -198,9 +221,9 @@ final class AqIncomingChannel implements IncomingChannel {
             deliveryLock.unlock();
         }
         try {
-            nativeMessage = resources.consumer().receive(config.receiveTimeout().toMillis());
-        } catch (JMSException e) {
-            if (draining.get()) {
+            nativeMessage = current.consumer().receive(config.receiveTimeout().toMillis());
+        } catch (JMSException | RuntimeException e) {
+            if (draining.get() || recover(current, e)) {
                 return;
             }
             throw e;
@@ -221,7 +244,7 @@ final class AqIncomingChannel implements IncomingChannel {
             return;
         }
         ConnectorDelivery delivery = null;
-        boolean settled = false;
+        boolean abandonRequired = true;
         Throwable failure = null;
         try {
             AqMessage<?> message;
@@ -229,6 +252,12 @@ final class AqIncomingChannel implements IncomingChannel {
             try {
                 message = AqMessageMapper.fromNative(nativeMessage, config);
             } catch (RuntimeException e) {
+                if (e instanceof AqMappingException && recover(current, e)) {
+                    // Snapshotting can still access the provider. Retiring its failed generation abandons this
+                    // dequeue without dispatching a partial payload or treating connection loss as a poison message.
+                    abandonRequired = false;
+                    return;
+                }
                 mappingFailure = new MessagingException("Cannot map incoming AQ message", e);
                 message = AqMessageMapper.metadataOnly(nativeMessage);
             }
@@ -244,19 +273,27 @@ final class AqIncomingChannel implements IncomingChannel {
             if (closed.get()) {
                 return;
             }
-            if (config.transacted()) {
-                resources.session().commit();
-            } else {
-                nativeMessage.acknowledge();
+            try {
+                if (config.transacted()) {
+                    current.session().commit();
+                } else {
+                    nativeMessage.acknowledge();
+                }
+            } catch (JMSException | RuntimeException e) {
+                if (!recover(current, e)) {
+                    throw e;
+                }
+                // The old generation is retired. Let Oracle decide whether to redeliver an uncertain settlement;
+                // do not roll back or repeat the handler through the replacement session.
             }
-            settled = true;
+            abandonRequired = false;
         } catch (JMSException | RuntimeException | Error e) {
             failure = e;
             throw e;
         } finally {
             try {
-                if (!settled) {
-                    abandon(failure);
+                if (abandonRequired) {
+                    abandon(current, failure);
                 }
             } finally {
                 if (delivery != null) {
@@ -316,15 +353,19 @@ final class AqIncomingChannel implements IncomingChannel {
         }
     }
 
-    private void abandon(Throwable failure) throws JMSException {
+    private boolean recover(AqResources current, Throwable failure) {
+        return !closed.get() && !draining.get() && resources.reconnect(current, failure);
+    }
+
+    private void abandon(AqResources current, Throwable failure) throws JMSException {
         if (closed.get()) {
             return;
         }
         try {
             if (config.transacted()) {
-                resources.session().rollback();
+                current.session().rollback();
             } else {
-                resources.session().recover();
+                current.session().recover();
             }
         } catch (JMSException | RuntimeException e) {
             if (failure != null) {

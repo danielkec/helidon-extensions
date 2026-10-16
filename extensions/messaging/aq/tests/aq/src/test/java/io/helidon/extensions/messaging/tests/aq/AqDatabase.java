@@ -20,6 +20,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
@@ -100,6 +102,32 @@ final class AqDatabase implements AutoCloseable {
             }
         }
         throw new AssertionError("AQ source did not enter the database dequeue wait");
+    }
+
+    int killSessions() throws SQLException {
+        List<String> sessions = new ArrayList<>();
+        try (Connection connection = administrator.getConnection();
+             var query = connection.prepareStatement("SELECT SID, SERIAL# FROM V$SESSION WHERE USERNAME = ?")) {
+            query.setString(1, schema);
+            try (var result = query.executeQuery()) {
+                while (result.next()) {
+                    sessions.add(result.getInt(1) + "," + result.getInt(2));
+                }
+            }
+            try (var statement = connection.createStatement()) {
+                for (String session : sessions) {
+                    try {
+                        statement.execute("ALTER SYSTEM KILL SESSION '" + session + "' IMMEDIATE");
+                    } catch (SQLException e) {
+                        // A disconnected session may disappear between the lookup and the kill request.
+                        if (e.getErrorCode() != 30 && e.getErrorCode() != 31) {
+                            throw e;
+                        }
+                    }
+                }
+            }
+        }
+        return sessions.size();
     }
 
     @Override

@@ -25,8 +25,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
@@ -87,6 +89,7 @@ import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.CoreMatchers.sameInstance;
+import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -211,6 +214,113 @@ class AqConnectorIT {
             database.awaitDequeue();
         }
         assertThat(received.get(), is(0));
+    }
+
+    @Test
+    void incomingResumesAfterItsDatabaseSessionIsKilled() throws Exception {
+        AqConnector connector = reconnectConnector("RECONNECT_QUEUE");
+        BlockingQueue<String> messages = new LinkedBlockingQueue<>();
+        var channel = MessagingChannel.create("reconnected", String.class);
+        try (var graph = MessagingGraph.builder().channel(channel)
+                .incomingChannel(channel, connector.incoming(AqIncomingConfig.builder()
+                        .connector("reconnect-aq").channelName("reconnected").build()))
+                .payloadSink(channel, messages::add).build()) {
+            graph.start();
+            sendText(connector, AqMessage.create("before failure"));
+            assertThat(messages.poll(20, TimeUnit.SECONDS), is("before failure"));
+            database.awaitDequeue();
+            assertThat(database.killSessions(), greaterThan(0));
+
+            sendText(connector, AqMessage.create("after recovery"));
+            assertThat(messages.poll(20, TimeUnit.SECONDS), is("after recovery"));
+        }
+    }
+
+    @Test
+    void uncertainIncomingCommitAllowsDatabaseRedeliveryAfterReconnect() throws Exception {
+        AqConnector connector = reconnectConnector("RECONNECT_QUEUE");
+        BlockingQueue<AqMessage<?>> messages = new LinkedBlockingQueue<>();
+        CountDownLatch releaseHandler = new CountDownLatch(1);
+        AtomicBoolean first = new AtomicBoolean(true);
+        var channel = MessagingChannel.create("reconnected", String.class);
+        try (var graph = MessagingGraph.builder().channel(channel)
+                .incomingChannel(channel, connector.incoming(AqIncomingConfig.builder()
+                        .connector("reconnect-aq").channelName("reconnected").build()))
+                .messageSink(channel, message -> {
+                    messages.add((AqMessage<?>) message);
+                    if (first.compareAndSet(true, false)) {
+                        try {
+                            assertThat(releaseHandler.await(20, TimeUnit.SECONDS), is(true));
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException("Interrupted test handler", e);
+                        }
+                    }
+                }).build()) {
+            graph.start();
+            sendText(connector, AqMessage.create("redeliver after disconnect"));
+            AqMessage<?> original = messages.poll(20, TimeUnit.SECONDS);
+            assertThat(original, notNullValue());
+            assertThat(original.messageId().isPresent(), is(true));
+            try {
+                assertThat(database.killSessions(), greaterThan(0));
+            } finally {
+                releaseHandler.countDown();
+            }
+            AqMessage<?> redelivered = messages.poll(20, TimeUnit.SECONDS);
+            assertThat(redelivered, notNullValue());
+            assertThat(redelivered.entity(), is("redeliver after disconnect"));
+            // Oracle can leave JMSRedelivered false after a killed session; the same native ID proves redelivery.
+            assertThat(redelivered.messageId(), is(original.messageId()));
+
+            sendText(connector, AqMessage.create("after redelivery"));
+            AqMessage<?> next = messages.poll(20, TimeUnit.SECONDS);
+            assertThat(next, notNullValue());
+            assertThat(next.entity(), is("after redelivery"));
+        } finally {
+            releaseHandler.countDown();
+        }
+    }
+
+    @Test
+    void failedOutgoingSendIsNotReplayedAndTheChannelRecovers() throws Exception {
+        AqConnector connector = reconnectConnector("RECONNECT_QUEUE");
+        try (var outgoing = connector.outgoing(AqOutgoingConfig.builder()
+                .connector("reconnect-aq").channelName("outgoing").build())) {
+            outgoing.start();
+            assertThat(database.killSessions(), greaterThan(0));
+            assertThrows(BatchDeliveryException.class,
+                         () -> outgoing.sendBatch(MessageBatch.create(AqMessage.create("failed send"))));
+
+            outgoing.sendBatch(MessageBatch.create(AqMessage.create("after recovery")));
+            TextMessage delivered = receiveText("RECONNECT_QUEUE", 1000);
+            assertThat(delivered, notNullValue());
+            assertThat(delivered.getText(), is("after recovery"));
+            assertThat("the failed send must not be replayed", receiveText("RECONNECT_QUEUE", 200), nullValue());
+        }
+    }
+
+    @Test
+    void reconnectRestoresDurableSubscriptionAndSelector() throws Exception {
+        AqConnector connector = reconnectConnector("RECONNECT_TOPIC");
+        BlockingQueue<String> messages = new LinkedBlockingQueue<>();
+        var channel = MessagingChannel.create("reconnected", String.class);
+        var incoming = connector.incoming(AqIncomingConfig.builder()
+                .connector("reconnect-aq").channelName("reconnected").destinationType(AqDestinationType.TOPIC)
+                .durable(true).subscriptionName("RECONNECTED_SUBSCRIBER").messageSelector("region = 'EU'").build());
+        try (var graph = MessagingGraph.builder().channel(channel).incomingChannel(channel, incoming)
+                .payloadSink(channel, messages::add).build()) {
+            graph.start();
+            database.awaitDequeue();
+            assertThat(database.killSessions(), greaterThan(0));
+            try (var outgoing = connector.outgoing(AqOutgoingConfig.builder()
+                    .connector("reconnect-aq").channelName("outgoing").destinationType(AqDestinationType.TOPIC).build())) {
+                outgoing.start();
+                outgoing.sendBatch(MessageBatch.create(AqMessage.builder("excluded").putProperty("region", "US").build()));
+                outgoing.sendBatch(MessageBatch.create(AqMessage.builder("included").putProperty("region", "EU").build()));
+                assertThat(messages.poll(20, TimeUnit.SECONDS), is("included"));
+            }
+        }
     }
 
     @Test
@@ -459,6 +569,14 @@ class AqConnectorIT {
         return manager.registry().get(MessagingRuntime.class);
     }
 
+    private static void sendText(AqConnector connector, AqMessage<String> message) {
+        try (var outgoing = connector.outgoing(AqOutgoingConfig.builder()
+                .connector("reconnect-aq").channelName("test-sender").build())) {
+            outgoing.start();
+            outgoing.sendBatch(MessageBatch.create(message));
+        }
+    }
+
     private static void assertLobValue(AqAdt value) {
         assertThat(value.attributes().get(0), instanceOf(AqBlob.class));
         assertThat(((AqBlob) value.attributes().get(0)).bytes(), is(new byte[] {0, 1, 2, (byte) 255}));
@@ -503,6 +621,14 @@ class AqConnectorIT {
                 .addAttribute(AqBlob.builder().bytes(new byte[] {0, 1, 2, (byte) 255}).build())
                 .addAttribute(AqClob.builder().text("LOB content").build())
                 .addAttribute(AqClob.builder().text("národní 漢字").national(true).build())
+                .build();
+    }
+
+    private AqConnector reconnectConnector(String destination) {
+        return AqConnector.builder().name("reconnect-aq").dataSource(database.dataSource())
+                .schema(database.schema()).destination(destination).receiveTimeout(Duration.ofSeconds(30))
+                .reconnect(reconnect -> reconnect.initialDelay(Duration.ofMillis(50)).maxDelay(Duration.ofMillis(100))
+                        .jitter(0).connectTimeout(Duration.ofSeconds(5)).waitTimeout(Duration.ofSeconds(10)))
                 .build();
     }
 

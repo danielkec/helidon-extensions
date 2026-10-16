@@ -72,7 +72,7 @@ final class AqMessageMapper {
                     ? AqValues.serialize((Serializable) body) : null;
             return AqMessage.incoming(body, serialized, readProperties(message), message, true);
         } catch (JMSException | SQLException e) {
-            throw new MessagingException("Cannot snapshot incoming AQ message", e);
+            throw new AqMappingException("Cannot snapshot incoming AQ message", e);
         }
     }
 
@@ -145,6 +145,9 @@ final class AqMessageMapper {
             if (e instanceof MessagingException messagingException) {
                 throw messagingException;
             }
+            if (e instanceof JMSException || e instanceof SQLException) {
+                throw new AqMappingException(e);
+            }
             throw new MessagingException("Cannot map outgoing AQ message", e);
         }
     }
@@ -198,7 +201,7 @@ final class AqMessageMapper {
                 return data.payload;
             }
             if (payload instanceof FailedAdtData data) {
-                throw new MessagingException("Cannot snapshot incoming AQ ADT payload", data.failure);
+                throw new AqMappingException("Cannot snapshot incoming AQ ADT payload", data.failure);
             }
             throw new MessagingException("Unsupported AQ ADT factory result: "
                                                  + (payload == null ? "null" : payload.getClass().getName()));

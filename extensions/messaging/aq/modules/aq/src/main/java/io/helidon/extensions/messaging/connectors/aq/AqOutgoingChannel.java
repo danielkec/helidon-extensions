@@ -45,7 +45,7 @@ final class AqOutgoingChannel implements OutgoingChannel {
     private static final System.Logger LOGGER = System.getLogger(AqOutgoingChannel.class.getName());
 
     private final AqRuntimeConfig config;
-    private final AqResources resources;
+    private final AqResourceManager resources;
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean closing = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -54,7 +54,7 @@ final class AqOutgoingChannel implements OutgoingChannel {
 
     AqOutgoingChannel(AqRuntimeConfig config, AqResourceResolver resolver) {
         this.config = Objects.requireNonNull(config);
-        this.resources = new AqResources(config, resolver);
+        this.resources = new AqResourceManager(config, resolver, false);
     }
 
     @Override
@@ -65,7 +65,7 @@ final class AqOutgoingChannel implements OutgoingChannel {
         requireAccepting();
         requireOpen();
         try {
-            resources.open(false);
+            resources.open();
         } catch (RuntimeException | Error failure) {
             closed.set(true);
             try {
@@ -88,10 +88,20 @@ final class AqOutgoingChannel implements OutgoingChannel {
                 throw new IllegalStateException("AQ outgoing channel has not been started");
             }
             sender.set(Thread.currentThread());
+            AqResources generation;
+            try {
+                generation = resources.awaitReady(config.reconnect().waitTimeout());
+            } catch (MessagingException failure) {
+                List<BatchItemOutcome> outcomes = new ArrayList<>(batch.size());
+                for (int i = 0; i < batch.size(); i++) {
+                    outcomes.add(BatchItemOutcome.notAttempted(i));
+                }
+                throw new BatchDeliveryException("AQ connection is unavailable", failure, batch, outcomes);
+            }
             if (config.transacted()) {
-                sendTransacted(batch);
+                sendTransacted(generation, batch);
             } else {
-                sendIndividual(batch);
+                sendIndividual(generation, batch);
             }
         } catch (Error failure) {
             // An unexpected fatal failure must not leave an uncommitted session available for another send.
@@ -117,6 +127,7 @@ final class AqOutgoingChannel implements OutgoingChannel {
     @Override
     public void close() {
         closing.set(true);
+        resources.stopRecovery();
         try {
             if (!sendLock.tryLock(config.closeTimeout().toMillis(), TimeUnit.MILLISECONDS)) {
                 forceClose();
@@ -154,19 +165,21 @@ final class AqOutgoingChannel implements OutgoingChannel {
         }
     }
 
-    private void sendIndividual(MessageBatch<?> batch) {
+    private void sendIndividual(AqResources generation, MessageBatch<?> batch) {
         List<BatchItemOutcome> outcomes = new ArrayList<>(batch.size());
         for (int i = 0; i < batch.size(); i++) {
             javax.jms.Message nativeMessage = null;
             boolean sendInvoked = false;
+            Throwable connectionFailure = null;
+            boolean terminalFailure = false;
             try {
                 requireOpen();
                 Message<?> message = batch.get(i);
-                AQjmsAgent[] recipients = prepareRecipients(message);
-                nativeMessage = AqMessageMapper.toNative(resources.session(), message, config);
+                AQjmsAgent[] recipients = prepareRecipients(generation, message);
+                nativeMessage = AqMessageMapper.toNative(generation.session(), message, config);
                 requireOpen();
                 sendInvoked = true;
-                send(nativeMessage, recipients);
+                send(generation, nativeMessage, recipients);
                 outcomes.add(BatchItemOutcome.succeeded(i));
             } catch (JMSException | RuntimeException failure) {
                 outcomes.add(sendInvoked
@@ -175,17 +188,20 @@ final class AqOutgoingChannel implements OutgoingChannel {
                 for (int remaining = i + 1; remaining < batch.size(); remaining++) {
                     outcomes.add(BatchItemOutcome.notAttempted(remaining));
                 }
-                if (sendInvoked) {
-                    forceClose();
+                if ((sendInvoked || failure instanceof AqMappingException) && AqReconnectSupport.recoverable(failure)) {
+                    connectionFailure = failure;
+                } else {
+                    terminalFailure = sendInvoked;
                 }
                 throw new BatchDeliveryException("AQ send failed", failure, batch, outcomes);
             } finally {
                 release(nativeMessage);
+                finishFailure(generation, connectionFailure, terminalFailure);
             }
         }
     }
 
-    private void sendTransacted(MessageBatch<?> batch) {
+    private void sendTransacted(AqResources generation, MessageBatch<?> batch) {
         if (batch.size() == 0) {
             return;
         }
@@ -194,23 +210,26 @@ final class AqOutgoingChannel implements OutgoingChannel {
         int index = 0;
         int attempted = 0;
         boolean commitInvoked = false;
+        Throwable connectionFailure = null;
+        boolean terminalFailure = false;
         try {
             for (; index < batch.size(); index++) {
                 requireOpen();
                 Message<?> message = batch.get(index);
-                recipients.add(prepareRecipients(message));
-                prepared.add(AqMessageMapper.toNative(resources.session(), message, config));
+                recipients.add(prepareRecipients(generation, message));
+                prepared.add(AqMessageMapper.toNative(generation.session(), message, config));
             }
             for (index = 0; index < batch.size(); index++) {
                 requireOpen();
                 attempted = index + 1;
-                send(prepared.get(index), recipients.get(index));
+                send(generation, prepared.get(index), recipients.get(index));
             }
             requireOpen();
             commitInvoked = true;
-            resources.session().commit();
+            generation.session().commit();
         } catch (JMSException | RuntimeException failure) {
-            boolean rolledBack = rollback(failure);
+            Throwable rollbackFailure = rollback(generation, failure);
+            boolean rolledBack = rollbackFailure == null;
             List<BatchItemOutcome> outcomes = new ArrayList<>(batch.size());
             for (int i = 0; i < batch.size(); i++) {
                 if (commitInvoked || i < attempted && !rolledBack) {
@@ -221,17 +240,22 @@ final class AqOutgoingChannel implements OutgoingChannel {
                     outcomes.add(BatchItemOutcome.notAttempted(i));
                 }
             }
-            if (commitInvoked || !rolledBack) {
-                forceClose();
+            if ((attempted > 0 || failure instanceof AqMappingException) && AqReconnectSupport.recoverable(failure)) {
+                connectionFailure = failure;
+            } else if (rollbackFailure != null && AqReconnectSupport.recoverable(rollbackFailure)) {
+                connectionFailure = rollbackFailure;
+            } else {
+                terminalFailure = commitInvoked || !rolledBack;
             }
             throw new BatchDeliveryException("AQ transaction failed", failure, batch, outcomes);
         } finally {
             prepared.forEach(AqOutgoingChannel::release);
+            finishFailure(generation, connectionFailure, terminalFailure);
         }
     }
 
-    private void send(javax.jms.Message nativeMessage, AQjmsAgent[] recipients) throws JMSException {
-        MessageProducer producer = resources.producer();
+    private void send(AqResources generation, javax.jms.Message nativeMessage, AQjmsAgent[] recipients) throws JMSException {
+        MessageProducer producer = generation.producer();
         if (recipients.length > 0) {
             ((AQjmsProducer) producer).publish(nativeMessage,
                                                recipients,
@@ -245,9 +269,9 @@ final class AqOutgoingChannel implements OutgoingChannel {
         }
     }
 
-    private AQjmsAgent[] prepareRecipients(Message<?> message) {
+    private AQjmsAgent[] prepareRecipients(AqResources generation, Message<?> message) {
         if (message instanceof AqMessage<?> aq && !aq.recipients().isEmpty()) {
-            if (config.destinationType() != AqDestinationType.TOPIC || !(resources.producer() instanceof AQjmsProducer)) {
+            if (config.destinationType() != AqDestinationType.TOPIC || !(generation.producer() instanceof AQjmsProducer)) {
                 throw new MessagingException("AQ recipient lists require an Oracle AQ multi-consumer topic producer");
             }
             return aq.recipients().stream().map(AqOutgoingChannel::toAgent).toArray(AQjmsAgent[]::new);
@@ -255,13 +279,23 @@ final class AqOutgoingChannel implements OutgoingChannel {
         return new AQjmsAgent[0];
     }
 
-    private boolean rollback(Throwable failure) {
+    private Throwable rollback(AqResources generation, Throwable failure) {
         try {
-            resources.session().rollback();
-            return true;
+            generation.session().rollback();
+            return null;
         } catch (JMSException | RuntimeException rollbackFailure) {
             failure.addSuppressed(rollbackFailure);
-            return false;
+            return rollbackFailure;
+        }
+    }
+
+    private void finishFailure(AqResources generation, Throwable connectionFailure, boolean terminalFailure) {
+        if (connectionFailure != null) {
+            if (!resources.reconnect(generation, connectionFailure)) {
+                forceClose();
+            }
+        } else if (terminalFailure) {
+            forceClose();
         }
     }
 

@@ -21,6 +21,7 @@ import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.NClob;
 import java.sql.SQLException;
+import java.sql.SQLRecoverableException;
 import java.sql.Struct;
 import java.sql.Types;
 import java.util.Collections;
@@ -229,6 +230,20 @@ class AqLobTest {
         assertThat(metadata.bodyAvailable(), is(false));
         assertThrows(MessagingException.class, metadata::entity);
         AqMessageMapper.releaseNative(incoming);
+    }
+
+    @Test
+    void connectionFailureDuringAdtDetachmentIsMarkedForRecovery() throws Exception {
+        Blob blob = mock(Blob.class);
+        SQLRecoverableException connectionFailure = new SQLRecoverableException("connection lost", "08006");
+        when(blob.length()).thenThrow(connectionFailure);
+        OracleData data = detach(struct("APP.VALUE", blob), 4);
+
+        AqMappingException failure = assertThrows(AqMappingException.class, () -> snapshot(data));
+
+        assertThat(failure.getCause(), sameInstance(connectionFailure));
+        assertThat(AqReconnectSupport.recoverable(failure), is(true));
+        verify(blob).free();
     }
 
     @Test

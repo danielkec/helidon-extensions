@@ -240,6 +240,59 @@ class AqConfigTest {
                      () -> connector.incoming(AqIncomingConfig.builder(typed).subscriptionName("explicit").build()));
     }
 
+    @Test
+    void testReconnectDefaultsAndWholePolicyOverride() {
+        AqReconnectConfig defaults = AqRuntimeConfig.incoming(defaults(), incoming()).reconnect();
+        assertThat(defaults.enabled(), is(true));
+        assertThat(defaults.initialDelay(), is(Duration.ofMillis(100)));
+        assertThat(defaults.maxDelay(), is(Duration.ofSeconds(30)));
+        assertThat(defaults.jitter(), is(0.2));
+        assertThat(defaults.connectTimeout(), is(Duration.ofSeconds(10)));
+        assertThat(defaults.waitTimeout(), is(Duration.ofSeconds(30)));
+
+        AqReconnectConfig policy = AqReconnectConfig.builder().enabled(false).waitTimeout(Duration.ofSeconds(3)).build();
+        AqConnectorConfig connector = AqConnectorConfig.builder(defaults()).reconnect(policy).buildPrototype();
+        assertThat(AqRuntimeConfig.incoming(connector, incoming()).reconnect(), sameInstance(policy));
+        AqReconnectConfig override = AqReconnectConfig.builder().waitTimeout(Duration.ofSeconds(2)).build();
+        AqIncomingConfig channel = AqIncomingConfig.builder(incoming()).reconnect(override).build();
+        assertThat(AqRuntimeConfig.incoming(connector, channel).reconnect(), sameInstance(override));
+        assertThat(AqRuntimeConfig.incoming(connector, channel).reconnect().enabled(), is(true));
+    }
+
+    @Test
+    void testReconnectConfigurationKeys() {
+        Config config = Config.just(ConfigSources.create(Map.of(
+                "destination", "ORDERS",
+                "reconnect.enabled", "false",
+                "reconnect.initial-delay", "PT0.2S",
+                "reconnect.max-delay", "PT2S",
+                "reconnect.jitter", "0.5",
+                "reconnect.connect-timeout", "PT4S",
+                "reconnect.wait-timeout", "PT3S")));
+        AqReconnectConfig policy = AqRuntimeConfig.incoming(AqConnectorConfig.builder()
+                .name("aq").config(config).buildPrototype(), incoming()).reconnect();
+        assertThat(policy.enabled(), is(false));
+        assertThat(policy.initialDelay(), is(Duration.ofMillis(200)));
+        assertThat(policy.maxDelay(), is(Duration.ofSeconds(2)));
+        assertThat(policy.jitter(), is(0.5));
+        assertThat(policy.connectTimeout(), is(Duration.ofSeconds(4)));
+        assertThat(policy.waitTimeout(), is(Duration.ofSeconds(3)));
+    }
+
+    @Test
+    void testReconnectRejectsInvalidDurationsAndJitter() {
+        assertThrows(IllegalArgumentException.class, () -> AqReconnectConfig.builder().initialDelay(Duration.ZERO).build());
+        assertThrows(IllegalArgumentException.class,
+                     () -> AqReconnectConfig.builder().maxDelay(Duration.ofMillis(1)).build());
+        assertThrows(IllegalArgumentException.class,
+                     () -> AqReconnectConfig.builder().connectTimeout(Duration.ofNanos(1)).build());
+        assertThrows(IllegalArgumentException.class,
+                     () -> AqReconnectConfig.builder().waitTimeout(Duration.ofSeconds(-1)).build());
+        for (double jitter : List.of(-0.1, 1.1, Double.NaN, Double.POSITIVE_INFINITY)) {
+            assertThrows(IllegalArgumentException.class, () -> AqReconnectConfig.builder().jitter(jitter).build());
+        }
+    }
+
     private static AqConnectorConfig defaults() {
         return AqConnectorConfig.builder().name("aq").destination("ORDERS").buildPrototype();
     }

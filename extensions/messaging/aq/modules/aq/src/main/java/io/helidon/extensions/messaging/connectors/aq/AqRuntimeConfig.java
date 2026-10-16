@@ -44,6 +44,7 @@ record AqRuntimeConfig(String channelName,
                        boolean transacted,
                        boolean allowObjectMessages,
                        Duration closeTimeout,
+                       AqReconnectConfig reconnect,
                        Optional<String> messageSelector,
                        boolean durable,
                        Optional<String> subscriptionName,
@@ -97,6 +98,7 @@ record AqRuntimeConfig(String channelName,
         boolean noLocal = inherit(incoming.noLocal(), defaults.noLocal()).orElse(false);
         Duration receiveTimeout = inherit(incoming.receiveTimeout(), defaults.receiveTimeout()).orElse(Duration.ofMillis(100));
         Duration closeTimeout = inherit(channel.closeTimeout(), defaults.closeTimeout()).orElse(Duration.ofSeconds(10));
+        AqReconnectConfig reconnect = inherit(channel.reconnect(), defaults.reconnect()).orElseGet(AqReconnectConfig::create);
         Duration timeToLive = inherit(outgoing.timeToLive(), defaults.timeToLive()).orElse(Duration.ZERO);
         int maxBodyBytes = inherit(incoming.maxBodyBytes(), defaults.maxBodyBytes()).orElse(1_048_576);
         int deliveryMode = inherit(outgoing.deliveryMode(), defaults.deliveryMode()).orElse(DeliveryMode.PERSISTENT);
@@ -159,6 +161,7 @@ record AqRuntimeConfig(String channelName,
                                    inherit(channel.transacted(), defaults.transacted()).orElse(true),
                                    inherit(channel.allowObjectMessages(), defaults.allowObjectMessages()).orElse(false),
                                    closeTimeout,
+                                   reconnect,
                                    selector,
                                    durable,
                                    subscription,
