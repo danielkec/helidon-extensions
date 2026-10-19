@@ -60,6 +60,7 @@ import io.helidon.messaging.DeadLetterMessage;
 import io.helidon.messaging.FailureDisposition;
 import io.helidon.messaging.Message;
 import io.helidon.messaging.MessageBatch;
+import io.helidon.messaging.MessageHeaderValue;
 import io.helidon.messaging.MessagingChannel;
 import io.helidon.messaging.MessagingException;
 import io.helidon.messaging.MessagingGraph;
@@ -89,6 +90,7 @@ import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.CoreMatchers.sameInstance;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -186,6 +188,109 @@ class AqConnectorIT {
     @Test
     void topicReplyToSurvivesReceiveAndForwarding() throws Exception {
         verifyReplyTo("DURABLE_QUEUE", AqDestinationType.TOPIC);
+    }
+
+    @Test
+    void immediateMessagesOvertakeDelayedGenericAndAqMessages() throws Exception {
+        Receiver receiver = new Receiver();
+        ServiceRegistryManager manager = runtime("DELAY_TEXT_QUEUE", "", "", receiver);
+        Message<String> generic = Message.builder("generic delayed")
+                .localMetadata(AqMessage.DELIVERY_DELAY_METADATA, MessageHeaderValue.IntegerValue.create(5))
+                .localMetadata("private", "secret")
+                .build();
+        AqMessage<String> aq = AqMessage.builder("AQ delayed").deliveryDelay(Duration.ofSeconds(5)).build();
+        messaging(manager).emitBatch("outgoing", MessageBatch.create(List.of(generic, aq)));
+
+        assertThat("delayed messages must not be ready immediately", receiver.messages.poll(200, TimeUnit.MILLISECONDS),
+                   nullValue());
+        messaging(manager).emit("outgoing", Message.create("immediate"));
+        assertThat(receiver.await().entity(), is("immediate"));
+        List<AqMessage<?>> delayed = List.of(receiver.await(), receiver.await());
+        assertThat(delayed.stream().map(Message::entity).toList(), containsInAnyOrder("generic delayed", "AQ delayed"));
+        for (AqMessage<?> received : delayed) {
+            assertThat(received.localMetadata().isEmpty(), is(true));
+            assertThat(received.properties().containsKey(AqMessage.DELIVERY_DELAY_METADATA), is(false));
+            assertThat(received.properties().containsKey("private"), is(false));
+        }
+
+        messaging(manager).emit("outgoing", delayed.getFirst());
+        AqMessage<?> forwarded = receiver.messages.poll(2, TimeUnit.SECONDS);
+        assertThat("forwarding must not restart the original five-second delay", forwarded, notNullValue());
+        assertThat(forwarded.entity(), is(delayed.getFirst().entity()));
+    }
+
+    @Test
+    void failedBatchRollsBackDelayedDatabaseEnqueue() throws Exception {
+        ServiceRegistryManager manager = runtime("DELAY_ROLLBACK_QUEUE", "", "", null);
+        MessageBatch<Object> batch = MessageBatch.create(List.of(
+                AqMessage.<Object>builder("must roll back").deliveryDelay(Duration.ofSeconds(5)).build(),
+                Message.<Object>create(Map.of("wrong", "queue type"))));
+
+        BatchDeliveryException failure = assertThrows(BatchDeliveryException.class,
+                                                      () -> messaging(manager).emitBatch("outgoing", batch));
+
+        assertThat(failure.outcomes().stream().map(item -> item.status()).toList(),
+                   is(List.of(BatchItemStatus.FAILED, BatchItemStatus.FAILED)));
+        try (var connection = database.dataSource().getConnection(); var statement = connection.createStatement();
+             var result = statement.executeQuery("SELECT COUNT(*) FROM DELAY_ROLLBACK_TAB")) {
+            assertThat(result.next(), is(true));
+            assertThat("rollback must remove the waiting message, not merely leave it unavailable", result.getInt(1), is(0));
+        }
+    }
+
+    @Test
+    void timeToLiveStartsAfterDeliveryDelay() throws Exception {
+        Receiver receiver = new Receiver();
+        ServiceRegistryManager manager = runtime("DELAY_TTL_QUEUE", "time-to-live: PT2S", "", receiver);
+        messaging(manager).emit("outgoing", AqMessage.builder("available after delay")
+                .deliveryDelay(Duration.ofSeconds(5)).build());
+
+        assertThat(receiver.messages.poll(200, TimeUnit.MILLISECONDS), nullValue());
+        assertThat("the two-second TTL starts after the five-second delay",
+                   receiver.await().entity(), is("available after delay"));
+    }
+
+    @Test
+    void unconsumedDelayedMessageStillExpires() throws Exception {
+        ServiceRegistryManager manager = runtime("DELAY_EXPIRED_QUEUE", "time-to-live: PT2S", "", null);
+        messaging(manager).emit("outgoing", AqMessage.builder("expires after delay")
+                .deliveryDelay(Duration.ofSeconds(3)).build());
+
+        awaitMessageState("DELAY_EXPIRED_TAB", "EXPIRED");
+
+        assertThat(receiveText("DELAY_EXPIRED_QUEUE", 200), nullValue());
+    }
+
+    @Test
+    void adtMessagesSupportDeliveryDelay() throws Exception {
+        Receiver receiver = new Receiver();
+        ServiceRegistryManager manager = runtime("DELAY_ADT_QUEUE", "payload-type: ADT", "", receiver);
+        AqAdt payload = AqAdt.builder().typeName(database.schema() + ".AQ_TEST_EVENT")
+                .addAttribute("delayed ADT").addAttribute(new BigDecimal("42")).build();
+        messaging(manager).emit("outgoing", AqMessage.builder(payload).deliveryDelay(Duration.ofSeconds(3)).build());
+
+        assertThat(receiver.messages.poll(200, TimeUnit.MILLISECONDS), nullValue());
+        AqMessage<?> received = receiver.await();
+        assertThat(received.entity(), instanceOf(AqAdt.class));
+        assertThat(((AqAdt) received.entity()).attributes(), is(payload.attributes()));
+        assertThat(received.localMetadata().isEmpty(), is(true));
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "aq.test.xml", matches = "true")
+    void xmlMessagesSupportDeliveryDelay() throws Exception {
+        Receiver receiver = new Receiver();
+        ServiceRegistryManager manager = runtime("DELAY_XML_QUEUE", "payload-type: XML", "", receiver);
+        AqXml payload = AqXml.builder().text("<event>delayed XML</event>").build();
+        messaging(manager).emit("outgoing", AqMessage.builder(payload).deliveryDelay(Duration.ofSeconds(3)).build());
+
+        assertThat(receiver.messages.poll(200, TimeUnit.MILLISECONDS), nullValue());
+        AqMessage<?> received = receiver.await();
+        assertThat(received.entity(), instanceOf(AqXml.class));
+        var document = DocumentBuilderFactory.newInstance().newDocumentBuilder()
+                .parse(new InputSource(new StringReader(((AqXml) received.entity()).text())));
+        assertThat(document.getDocumentElement().getTextContent(), is("delayed XML"));
+        assertThat(received.localMetadata().isEmpty(), is(true));
     }
 
     @Test
@@ -725,6 +830,24 @@ class AqConnectorIT {
             }
         }
         throw new AssertionError("AQ durable subscription was not created");
+    }
+
+    private void awaitMessageState(String table, String state) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        try (var connection = database.dataSource().getConnection();
+             var statement = connection.prepareStatement("SELECT COUNT(*) FROM AQ$" + table + " WHERE MSG_STATE = ?")) {
+            statement.setString(1, state);
+            while (System.nanoTime() < deadline) {
+                try (var result = statement.executeQuery()) {
+                    result.next();
+                    if (result.getInt(1) > 0) {
+                        return;
+                    }
+                }
+                TimeUnit.MILLISECONDS.sleep(100);
+            }
+        }
+        throw new AssertionError("AQ message did not reach state " + state);
     }
 
     private static final class Receiver implements ConsumerRegistration {

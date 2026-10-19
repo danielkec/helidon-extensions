@@ -136,6 +136,43 @@ attributes. `max-body-bytes` bounds binary LOB bytes and character LOB character
 Java object messages are disabled by default because deserialization executes application class code.
 Enable them only for queues whose publishers and serialized classes the application trusts.
 
+## Delayed delivery
+
+Set a per-message delay before Oracle makes the enqueued message available for consumption:
+
+```java
+AqMessage<String> message = AqMessage.builder("order reminder")
+        .deliveryDelay(Duration.ofSeconds(30))
+        .build();
+```
+
+The convenience method sets one local metadata entry and preserves other entries. Ordinary Messaging envelopes
+can set the same option directly:
+
+```java
+Message<String> message = Message.builder("order reminder")
+        .localMetadata(AqMessage.DELIVERY_DELAY_METADATA,
+                       MessageHeaderValue.IntegerValue.create(30))
+        .build();
+```
+
+`AqMessage.DELIVERY_DELAY_METADATA` identifies `helidon.messaging.aq.delivery-delay-seconds`. Its value must be
+an integer between zero and `Integer.MAX_VALUE`, in seconds. Missing or zero means no added delay. The Duration
+convenience method rejects negative, fractional-second, and oversized durations. Invalid metadata fails the send
+before enqueue. The option works with JMS, ADT, and XML payloads and is applied through Oracle's `JMS_OracleDelay`
+system property. Other local metadata is not copied into native message headers, properties, or payloads.
+
+Send completion means successful enqueue/commit; Oracle controls when the message becomes available. The channel
+can send subsequent messages immediately. Reusing the same outgoing envelope applies the delay to each new enqueue.
+Received messages do not reconstruct this local option, so forwarding a received message does not restart its delay.
+The connector ignores delay metadata on `DeadLetterMessage` envelopes, whose local metadata includes copied values
+from the original message. Create a new outgoing envelope to request explicitly delayed error routing.
+
+Oracle's queue type determines support for delayed delivery. Persistent AQ queues support it; buffered queue support
+requires separate validation for the database and queue type. Oracle queue-monitor scheduling can affect when a delayed
+message becomes available. Expiration follows Oracle AQ semantics; the expiration interval starts when the message
+becomes ready for dequeue.
+
 ## Processing and settlement
 
 An incoming channel reserves runtime delivery capacity before receiving. It receives one message, waits for

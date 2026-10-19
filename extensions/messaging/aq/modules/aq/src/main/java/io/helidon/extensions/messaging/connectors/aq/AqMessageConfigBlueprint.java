@@ -22,13 +22,14 @@ import java.util.Optional;
 
 import io.helidon.builder.api.Option;
 import io.helidon.builder.api.Prototype;
+import io.helidon.messaging.MessageHeaderValue;
 
 /**
  * Outgoing AQ message construction options.
  *
  * @param <T> entity type
  */
-@Prototype.Blueprint
+@Prototype.Blueprint(decorator = AqMessageSupport.BuilderDecorator.class)
 @Prototype.Sealed
 @Prototype.CustomMethods(AqMessageSupport.class)
 interface AqMessageConfigBlueprint<T> extends Prototype.Factory<AqMessage<T>> {
@@ -39,6 +40,18 @@ interface AqMessageConfigBlueprint<T> extends Prototype.Factory<AqMessage<T>> {
      */
     @Option.Confidential
     T entity();
+
+    /**
+     * Metadata local to this message envelope, initially empty.
+     * Setting this map replaces all entries; adding a value replaces the value with the same exact name.
+     * The AQ connector interprets {@link io.helidon.extensions.messaging.connectors.aq.AqMessage#DELIVERY_DELAY_METADATA}
+     * as a delivery option. Other local metadata is not copied into native message properties.
+     *
+     * @return local metadata
+     */
+    @Option.Confidential
+    @Option.Singular(value = "localMetadata", withPrefix = false)
+    Map<String, MessageHeaderValue> localMetadata();
 
     /**
      * Correlation identifier.

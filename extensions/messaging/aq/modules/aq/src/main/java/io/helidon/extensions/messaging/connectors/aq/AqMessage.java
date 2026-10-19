@@ -31,6 +31,7 @@ import javax.jms.Topic;
 
 import io.helidon.messaging.Message;
 import io.helidon.messaging.MessageHeaders;
+import io.helidon.messaging.MessageMetadata;
 import io.helidon.messaging.MessagingException;
 
 import oracle.jms.AQjmsAgent;
@@ -49,11 +50,21 @@ import oracle.jms.AdtMessage;
  * @param <T> payload type
  */
 public final class AqMessage<T> implements Message<T> {
+    /**
+     * Local metadata entry controlling the delay before an outgoing message becomes available for dequeue.
+     * The value must be a {@link io.helidon.messaging.MessageHeaderValue.IntegerValue} between zero and
+     * {@link java.lang.Integer#MAX_VALUE}, in seconds. Missing or zero means no added delay.
+     * The connector interprets this entry as Oracle's delivery-delay option, not as an application property.
+     * It is ignored on {@link io.helidon.messaging.DeadLetterMessage} envelopes and is not populated on received messages.
+     */
+    public static final String DELIVERY_DELAY_METADATA = "helidon.messaging.aq.delivery-delay-seconds";
+
     private final Object entity;
     private final byte[] serializedEntity;
     private final boolean bodyAvailable;
     private final Map<String, Object> properties;
     private final MessageHeaders headers;
+    private final MessageMetadata localMetadata;
     private final List<AqRecipient> recipients;
     private final Optional<String> messageId;
     private final Optional<String> correlationId;
@@ -76,6 +87,9 @@ public final class AqMessage<T> implements Message<T> {
         this.bodyAvailable = bodyAvailable;
         this.properties = AqValues.properties(config.properties());
         this.headers = AqValues.headers(properties);
+        MessageMetadata.Builder metadata = MessageMetadata.builder();
+        config.localMetadata().forEach(metadata::set);
+        this.localMetadata = metadata.build();
         this.recipients = List.copyOf(config.recipients());
         this.messageId = Optional.empty();
         this.correlationId = config.correlationId();
@@ -102,6 +116,7 @@ public final class AqMessage<T> implements Message<T> {
         this.bodyAvailable = bodyAvailable;
         this.properties = AqValues.properties(properties);
         this.headers = AqValues.headers(this.properties);
+        this.localMetadata = MessageMetadata.empty();
         this.recipients = List.of();
         this.messageId = Optional.ofNullable(message.getJMSMessageID());
         this.correlationId = Optional.ofNullable(message.getJMSCorrelationID());
@@ -216,6 +231,11 @@ public final class AqMessage<T> implements Message<T> {
     @Override
     public MessageHeaders headers() {
         return headers;
+    }
+
+    @Override
+    public MessageMetadata localMetadata() {
+        return localMetadata;
     }
 
     /**
