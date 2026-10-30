@@ -25,6 +25,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -38,19 +39,40 @@ import dev.langchain4j.mcp.client.transport.McpOperationHandler;
 import dev.langchain4j.mcp.client.transport.http.StreamableHttpMcpTransport;
 import dev.langchain4j.mcp.protocol.McpInitializeRequest;
 import dev.langchain4j.mcp.protocol.McpListToolsRequest;
+import dev.langchain4j.spi.CapturedContext;
+import dev.langchain4j.spi.ExecutorProvider;
 import io.helidon.common.context.Context;
 import io.helidon.common.context.Contexts;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.WebClient;
 import io.helidon.webclient.context.WebClientContextService;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 
+@Isolated
+@Execution(ExecutionMode.SAME_THREAD)
 class HelidonHttpClientContextTest {
     private static final String INITIALIZE_RESULT =
             "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"proof\",\"version\":\"1\"}}}";
+
+    private ExecutorProvider previousProvider;
+
+    @BeforeEach
+    void saveProvider() {
+        previousProvider = ExecutorProvider.get();
+    }
+
+    @AfterEach
+    void restoreProvider() {
+        ExecutorProvider.set(previousProvider);
+    }
 
     @Test
     void captured_context_keeps_connection_and_request_headers_isolated() throws Exception {
@@ -63,6 +85,23 @@ class HelidonHttpClientContextTest {
     }
 
     private static void runScenario(boolean captureContext) throws Exception {
+        if (captureContext) {
+            ExecutorProvider.set(new ExecutorProvider() {
+                @Override
+                public Executor executor() {
+                    return null; // Context capture only; retain LangChain4j's default executor.
+                }
+
+                @Override
+                public CapturedContext captureContext() {
+                    Context captured = Contexts.context().orElseGet(Context::create);
+                    return task -> () -> Contexts.runInContext(captured, task);
+                }
+            });
+        } else {
+            // Disable capture explicitly even if a provider is discovered through ServiceLoader.
+            ExecutorProvider.set(() -> null);
+        }
         try (ProofServer server = new ProofServer()) {
             server.start();
             WebClient webClient = WebClient.create(builder -> builder
@@ -74,14 +113,10 @@ class HelidonHttpClientContextTest {
             try {
                 HelidonHttpClient adapter = HelidonHttpClient.builder().webClient(webClient).build();
                 try (adapter) {
-                    var builder = StreamableHttpMcpTransport.builder().url(server.url()).httpClient(adapter);
-                    if (captureContext) {
-                        builder.requestContextFactory(() -> {
-                            Context captured = Contexts.context().orElseGet(Context::create);
-                            return task -> () -> Contexts.runInContext(captured, task);
-                        });
-                    }
-                    try (StreamableHttpMcpTransport transport = builder.build()) {
+                    try (StreamableHttpMcpTransport transport = StreamableHttpMcpTransport.builder()
+                            .url(server.url())
+                            .httpClient(adapter)
+                            .build()) {
                         transport.start(new McpOperationHandler(
                                 new ConcurrentHashMap<>(),
                                 List::of,

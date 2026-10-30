@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -54,9 +55,16 @@ import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.mcp.client.DefaultMcpClient;
 import dev.langchain4j.mcp.client.McpClient;
 import dev.langchain4j.mcp.client.transport.http.StreamableHttpMcpTransport;
+import dev.langchain4j.spi.CapturedContext;
+import dev.langchain4j.spi.ExecutorProvider;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.sdk.trace.data.SpanData;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import static org.hamcrest.CoreMatchers.anyOf;
 import static org.hamcrest.CoreMatchers.is;
@@ -67,6 +75,8 @@ import static org.hamcrest.MatcherAssert.assertThat;
  * Opt-in end-to-end check of bearer and trace propagation through real Helidon ingress,
  * LangChain4j MCP transport, Helidon WebClient, and a secured Helidon MCP server.
  */
+@Isolated
+@Execution(ExecutionMode.SAME_THREAD)
 class HelidonMcpKeycloakIT {
     private static final String REALM = "lc4j-mcp-e2e";
     private static final String AUDIENCE = "lc4j-mcp-test";
@@ -74,6 +84,30 @@ class HelidonMcpKeycloakIT {
     private static final String BOB = "bob";
     private static final Pattern ACCESS_TOKEN = Pattern.compile("\"access_token\"\\s*:\\s*\"([^\"]+)\"");
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
+
+    private ExecutorProvider previousProvider;
+
+    @BeforeEach
+    void installContextCapture() {
+        previousProvider = ExecutorProvider.get();
+        ExecutorProvider.set(new ExecutorProvider() {
+            @Override
+            public Executor executor() {
+                return null; // Context capture only; retain LangChain4j's default executor.
+            }
+
+            @Override
+            public CapturedContext captureContext() {
+                Context captured = Contexts.context().orElseGet(Context::create);
+                return task -> () -> Contexts.runInContext(captured, task);
+            }
+        });
+    }
+
+    @AfterEach
+    void restoreProvider() {
+        ExecutorProvider.set(previousProvider);
+    }
 
     @Test
     void propagatesKeycloakIdentityAndTraceAcrossConcurrentMcpCalls() throws Exception {
@@ -95,10 +129,6 @@ class HelidonMcpKeycloakIT {
                         StreamableHttpMcpTransport transport = StreamableHttpMcpTransport.builder()
                                 .url(mcpServer.url().toString())
                                 .httpClient(adapter)
-                                .requestContextFactory(() -> {
-                                    Context captured = Contexts.context().orElseGet(Context::create);
-                                    return task -> () -> Contexts.runInContext(captured, task);
-                                })
                                 .build()) {
                     IngressState ingressState = new IngressState(transport);
                     WebServerConfig.Builder ingressBuilder = WebServer.builder().host("127.0.0.1").port(0);

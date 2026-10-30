@@ -19,9 +19,9 @@ mvn -Phttp-client -pl extensions/langchain4j/modules/http-client -am test
 
 ## MCP context and header propagation
 
-Configure header propagation on the WebClient, then supply the adapter and the MCP
-context factory. The factory captures a caller's context before MCP defers work for
-initialization or retries. The adapter carries that context into its own virtual thread.
+Configure header propagation on the WebClient and register an `ExecutorProvider` that
+captures the framework context. MCP uses its `captureContext()` hook before deferring
+work for initialization or retries. The adapter carries that context into its own virtual thread.
 
 ```java
 WebClient webClient = WebClient.builder()
@@ -34,22 +34,36 @@ HelidonHttpClient httpClient = HelidonHttpClient.builder()
         .webClient(webClient)
         .build();
 
+ExecutorProvider.set(new ExecutorProvider() {
+    @Override
+    public Executor executor() {
+        return frameworkExecutor;
+    }
+
+    @Override
+    public CapturedContext captureContext() {
+        Context captured = Contexts.context().orElseGet(Context::create);
+        return action -> () -> Contexts.runInContext(captured, action);
+    }
+});
+
 StreamableHttpMcpTransport transport = StreamableHttpMcpTransport.builder()
         .url("http://localhost:8080/mcp")
         .httpClient(httpClient)
-        .requestContextFactory(() -> {
-            Context captured = Contexts.context().orElseGet(Context::create);
-            return action -> () -> Contexts.runInContext(captured, action);
-        })
         .build();
 ```
 
 The types above come from `io.helidon.webclient.api`, `io.helidon.webclient.context`,
 `io.helidon.http`, `io.helidon.common.context`,
 `io.helidon.extensions.langchain4j.httpclient` and
-`dev.langchain4j.mcp.client.transport.http`. Add `helidon-webclient-context` to use
+`dev.langchain4j.mcp.client.transport.http`, `dev.langchain4j.spi` and
+`java.util.concurrent`. Add `helidon-webclient-context` to use
 the native header service. Register the desired value under the `identity` classifier
 in the caller's Helidon Context; no MCP `customHeaders` supplier is needed.
+
+Register the provider once during application startup, coordinating with any existing
+provider because this setting is global. `frameworkExecutor` is an application-owned,
+shared executor. Framework integrations can also register the provider through `ServiceLoader`.
 
 The fresh empty context for an unbound caller is deliberate: it prevents that caller
 from inheriting a connection or completion thread's headers. Initialize a shared MCP
