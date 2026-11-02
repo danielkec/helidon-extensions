@@ -67,10 +67,14 @@ interface AqIncomingOptions {
     Optional<Boolean> noLocal();
 
     /**
-     * Maximum bytes-message body size, checked before allocating its snapshot.
-     * Defaults to 1 MiB. Other payload types do not expose a portable encoded size.
+     * Maximum size of an incoming bytes-message body or an individual SQL LOB attribute.
+     * Defaults to 1,048,576. The limit counts bytes for bytes-message bodies and BLOBs, and characters
+     * for CLOBs and NCLOBs. Each value is checked before allocating its snapshot, including LOBs in
+     * nested SQL objects and arrays.
+     * This is not an aggregate message-size limit. It does not bound text, XML, map or Java object
+     * message bodies, other SQL attributes, or the total size of an ADT payload.
      *
-     * @return maximum bytes-message body size
+     * @return maximum bytes or characters per bounded incoming value
      */
     @Option.Configured
     Optional<Integer> maxBodyBytes();

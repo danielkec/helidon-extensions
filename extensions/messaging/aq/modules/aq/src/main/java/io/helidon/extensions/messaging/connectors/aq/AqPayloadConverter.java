@@ -20,7 +20,8 @@ package io.helidon.extensions.messaging.connectors.aq;
  * Converts application values to and from the connector's detached payload types.
  * The connector invokes this converter while it owns transport resources.
  * Implementations must return non-null values independent of live database resources.
- * Native payloads are {@link AqAdt}, {@link AqXml}, text, byte arrays, or maps.
+ * Incoming payloads are {@link AqAdt}, {@link AqXml}, {@link java.lang.String}, byte arrays, maps,
+ * or {@link java.io.Serializable} values from object messages when {@code allow-object-messages} is enabled.
  * Application maps may contain domain-specific keys and values; native MapMessage restrictions apply to
  * maps read from or written to the transport. Message envelopes copy the map structure and byte-array
  * values, while retaining keys and other values, which must remain stable.
@@ -28,6 +29,7 @@ package io.helidon.extensions.messaging.connectors.aq;
 public interface AqPayloadConverter {
     /**
      * Convert an incoming detached native payload to an application value.
+     * Native message decoding and object-message opt-in checks occur before this method is invoked.
      *
      * @param payload detached payload
      * @return stable application value
@@ -36,6 +38,13 @@ public interface AqPayloadConverter {
 
     /**
      * Convert an application value to a supported detached native payload.
+     * For {@link AqPayloadType#JMS}, return a {@link java.lang.String}, byte array,
+     * {@link java.nio.ByteBuffer}, map with supported JMS map keys and values, or another
+     * {@link java.io.Serializable} value when {@code allow-object-messages} is enabled.
+     * Strings, byte arrays, buffers and maps select their corresponding JMS body types before
+     * the serializable-object fallback. A buffer contributes its remaining bytes without changing its position.
+     * For {@link AqPayloadType#ADT}, return an {@link AqAdt} with kind {@link AqAdt.Kind#STRUCT}.
+     * For {@link AqPayloadType#XML}, return an {@link AqXml} or XML text as a {@link java.lang.String}.
      *
      * @param entity application value
      * @return native payload value

@@ -126,14 +126,14 @@ Environment values are excluded from generated configuration string representati
 
 ## Payloads and metadata
 
-| Queue storage | Java payload | Configuration |
-| --- | --- | --- |
-| AQ JMS text | `String` | Default `payload-type: JMS` |
-| AQ JMS bytes | `byte[]` | Default `payload-type: JMS` |
-| AQ JMS map | `Map<String, Object>` with supported JMS map values | Default `payload-type: JMS` |
-| AQ JMS object | `Serializable` | `allow-object-messages: true` |
-| SQL object type | `AqAdt` | `payload-type: ADT` |
-| `SYS.XMLTYPE` | `AqXml` | `payload-type: XML` |
+| Queue storage | Incoming payload before conversion | Outgoing payload after conversion | Configuration |
+| --- | --- | --- | --- |
+| AQ JMS text | `String` | `String` | Default `payload-type: JMS` |
+| AQ JMS bytes | `byte[]` | `byte[]` or `ByteBuffer` | Default `payload-type: JMS` |
+| AQ JMS map | `Map<String, Object>` | `Map<String, Object>` with supported JMS map values | Default `payload-type: JMS` |
+| AQ JMS object | `Serializable` | Other `Serializable` values, subject to selection rules below | `payload-type: JMS`, `allow-object-messages: true` |
+| SQL object type | `AqAdt` with kind `STRUCT` | `AqAdt` with kind `STRUCT` | `payload-type: ADT` |
+| `SYS.XMLTYPE` | `AqXml` | `AqXml` or XML text as `String` | `payload-type: XML` |
 
 The database queue's storage type must match the payload. The connector does not provision database queues,
 types, users, or grants. Configured durable subscriptions are created through Oracle AQ.
@@ -144,12 +144,52 @@ map these values to another supported payload, such as text. JMS MapMessage key/
 when reading or writing the native map payload. Message envelopes copy the map structure and byte-array values;
 applications and converters must keep map keys and other nested values stable.
 
+For JMS output, built-in mapping applies after payload conversion and takes precedence over Java serialization:
+`String` becomes a text message, `byte[]` and `ByteBuffer` become bytes messages, and any `Map` remaining after
+conversion becomes a MapMessage, subject to the received ObjectMessage forwarding rule below.
+Only remaining `Serializable` values use ObjectMessage, with the explicit opt-in enabled. Enabling object messages
+does not force a Serializable map into ObjectMessage; there is no explicit wire-type override for a newly authored map.
+A received ObjectMessage that was not passed through an incoming converter retains its ObjectMessage kind when its
+`AqMessage` envelope is forwarded without an outgoing converter; the outgoing channel must also enable object messages.
+
+Use `AqMessage.mapBuilder(map)`, the `AqMessage.create(Map)` overload, or a no-argument builder with a Map interface
+entity type to construct a map envelope. The generic `AqMessage.builder(entity)` overload rejects map arguments.
+For buffers, declare the entity type as `ByteBuffer`; snapshots do not retain a concrete buffer subclass. Bytes-message
+mapping sends the buffer's remaining bytes without advancing its position.
+
+Native MapMessage keys must be non-empty strings. Its values may be `null`, `String`, `byte[]`, or boxed primitive
+values (`Boolean`, `Byte`, `Short`, `Integer`, `Long`, `Float`, `Double`, `Character`). Nested collections, nested maps
+and arbitrary objects need application conversion into a supported native payload before sending.
+Incoming StreamMessage and ordinary header-only JMS messages are unsupported; native decoding fails before an
+incoming `AqPayloadConverter` is invoked.
+
 `AqMessage<T>` is a detached message envelope. It carries the payload, correlation identifier, JMS type,
 reply-to destination, supported application properties, and explicit recipient list. Incoming metadata also
 includes the provider message ID, timestamp, expiry, priority, delivery mode, redelivery state, delivery
 attempts, and AQ sender when available. Availability depends on the queue payload and provider. Properties
 are also exposed through Messaging headers. Native ADT/XML messages support AQ correlation and recipient
 metadata but reject JMS type, reply-to, and application properties that their storage cannot represent.
+
+Application properties accept non-null `String`, `Boolean`, `Byte`, `Short`, `Integer`, `Long`, `Float` and `Double`
+values. Unlike MapMessage body entries, they cannot contain `Character`, binary arrays or null values. Property names
+follow Java identifier character rules and cannot be the selector keywords `NULL`, `TRUE`, `FALSE`, `NOT`, `AND`, `OR`,
+`BETWEEN`, `LIKE`, `IN`, `IS` or `ESCAPE` (case-insensitive). Names beginning with `JMS` are reserved, except for
+`JMSXGroupID` (a `String`) and `JMSXGroupSeq` (an `Integer`). Use the documented local metadata controls for the other
+supported Oracle options.
+
+Generic Messaging headers accept `TextValue`, `BooleanValue`, `IntegerValue`, `Float32Value` and `Float64Value` when
+mapped to JMS properties. Ordinary integer headers must fit a signed 64-bit value and are sent as JMS long properties;
+`JMSXGroupSeq` instead requires a signed 32-bit value and also accepts an integer text header. `JMSXGroupID` requires
+text. Duplicate exact header names and other value kinds, including binary, null, decimal, timestamp, UUID and native
+header values, are rejected. Forwarding an unchanged `AqMessage` preserves the numeric widths of its original
+application properties.
+
+Forwarding an `AqMessage` preserves its available correlation ID, JMS type, reply-to and application properties when
+the target payload supports them. Incoming recipient lists are not reconstructed; an empty outgoing recipient list
+uses the destination's configured subscribers. Each send uses the outgoing channel's `delivery-mode`, `priority` and
+`time-to-live`, including when forwarding. Received delivery mode, priority and absolute expiration are observations,
+not overrides for those outgoing settings. Provider-assigned message IDs, timestamps and redelivery information
+are not copied into the new native message.
 
 ```java
 AqMessage<String> message = AqMessage.builder("order created")
@@ -164,8 +204,9 @@ Recipient lists apply to multi-consumer queues, configured as `destination-type:
 can use `recipient-name` to consume for a named AQ recipient. Ordinary topic subscriptions can instead use
 `durable: true` and `subscription-name`; durable subscriptions remain in the database after channel shutdown.
 An empty outgoing recipient list uses AQ's configured subscribers. Incoming `message-selector` supports
-provider selectors. `no-local` applies to ordinary topic subscriptions and cannot be combined with an explicit
-recipient name.
+provider selectors. `no-local` suppresses messages published by the same connection for ordinary topic subscriptions
+and cannot be combined with an explicit recipient name. Each AQ channel owns a separate connection, so sharing a
+connector or DataSource does not make another outgoing channel's messages local to an incoming channel.
 
 Build SQL objects using their qualified database type name and ordered attributes:
 
@@ -192,7 +233,9 @@ AqClob nationalText = AqClob.builder().text("NCLOB content").national(true).buil
 
 An incoming ADT can be forwarded with these values intact. The connector creates temporary LOBs on the sending
 connection and releases them after use. Plain byte arrays and strings remain appropriate for RAW and character
-attributes. `max-body-bytes` bounds binary LOB bytes and character LOB characters retained per incoming value.
+attributes. `max-body-bytes` bounds each incoming bytes-message body and each detached SQL LOB value independently:
+bytes for BLOB, characters for CLOB/NCLOB. It is not an aggregate message or process-memory limit and does not bound
+text, XML, map or serialized object payload sizes, or the total size of an ADT containing multiple LOBs.
 
 Java object messages are disabled by default because deserialization executes application class code.
 Enable them only for queues whose publishers and serialized classes the application trusts.
@@ -342,9 +385,16 @@ returns a previously used destination object.
 An incoming channel reserves runtime delivery capacity before receiving. It receives one message, waits for
 Messaging processing and failure handling to finish, then settles the delivery before receiving another.
 There is no message `ack()`/`nack()` API and no independent polling executor.
+Configure application retry, drop and dead-letter policies using the shared
+[Messaging failure handling](https://github.com/helidon-io/helidon/blob/helidon-27.x/messaging/README.md#retry-drop-and-dead-letter-handling).
+
 ADT conversion failures, including incoming LOB size-limit violations, use the same configured drop, dead-letter,
 or terminal-failure handling as other payload mapping failures. Failed mappings retain available native metadata
 in an envelope whose body is unavailable.
+Such an envelope reports `bodyAvailable() == false`, and accessing `entity()` throws `MessagingException`.
+Forwarding it through an AQ outgoing channel configured with `payload-type: JMS` creates a header-only native message,
+which requires a compatible destination. Direct forwarding to an ADT/XML channel fails because there is no typed body;
+application failure handling must construct an appropriate replacement payload if it needs to send to one of those queues.
 
 The default `transacted: true` gives each channel an AQ local transaction. Successful incoming processing
 commits the dequeue; unhandled failure rolls it back. Outgoing batches commit together on that channel,
@@ -406,36 +456,77 @@ waiting for a recovered connection, not an in-progress database send. Configure 
 supplied data source or factory as appropriate. If a provider ignores cancellation, recovery waits for that attempt's
 cleanup before opening another connection, and closes any late resource returned after shutdown.
 
-## Configuration defaults
+## Configuration reference
 
-Settings can be declared on the connector and overridden on individual channels.
+Declare AQ defaults under `messaging.connector.<name>` with `type: helidon-aq`. Incoming and outgoing channels select
+that connector using `connector: <name>` and can override the settings for their direction. In the tables, **Common**
+applies to both directions; **Incoming** and **Outgoing** identify the channel behavior affected by the setting.
+Defaults below apply after inheritance. Durations use the ISO-8601 format accepted by `java.time.Duration`.
 
-| Setting | Default or requirement |
-| --- | --- |
-| `destination` | Existing queue name; required when `jndi` is absent |
-| `schema` | Connected database user |
-| `jndi.destination` | Lookup name; mutually exclusive with direct `destination`/`schema` at the same scope |
-| `jndi.env-properties` | Initial-context environment; empty by default |
-| `enqueue-transformation.name` | Existing Oracle transformation name; required when its policy is enabled |
-| `enqueue-transformation.enabled` | `true` within a configured policy; `false` disables an inherited policy |
-| `destination-type` | `QUEUE`; use `TOPIC` for multi-consumer queues |
-| `payload-type` | `JMS`; alternatives `ADT`, `XML` |
-| `transacted` | `true` |
-| `allow-object-messages` | `false` |
-| `receive-timeout` | `PT0.1S` |
-| `close-timeout` | `PT10S` |
-| `reconnect.enabled` | `true`; applies after successful startup |
-| `reconnect.initial-delay` | `PT0.1S`; doubles after each failed attempt |
-| `reconnect.max-delay` | `PT30S`; includes jitter |
-| `reconnect.jitter` | `0.2`; fraction in range `0` through `1` |
-| `reconnect.connect-timeout` | `PT10S`; maximum wait for one connection attempt |
-| `reconnect.wait-timeout` | `PT30S`; maximum outgoing wait for a recovered connection |
-| `max-body-bytes` | `1048576`; bounds incoming bytes messages and each detached SQL LOB value |
-| `durable` | `false`; when true requires `subscription-name` |
-| `no-local` | `false` |
-| `delivery-mode` | `2` (persistent), subject to Oracle queue support |
-| `priority` | `4`, in range `0` through `9` |
-| `time-to-live` | `PT0S` (no expiry) |
+Connection-resource choices are mutually exclusive at each scope: `data-source-name`, `connection-factory-name`,
+`jdbc-url`, or a programmatically supplied data source or connection factory. Selecting a resource on a channel
+replaces the inherited resource choice as a unit. Without an explicit choice, the connector selects an unqualified
+Service Registry data source, then an unqualified connection factory. Credentials inherit independently; the effective
+`username` and `password` must either both be present or both be absent.
+
+| Setting | Scope | Default and constraints |
+| --- | --- | --- |
+| `data-source-name` | Common | Absent; when set, selects a nonblank Service Registry data-source name |
+| `connection-factory-name` | Common | Absent; when set, selects a nonblank Service Registry AQ connection-factory name |
+| `jdbc-url` | Common | Absent; when set, uses a nonblank Oracle JDBC URL |
+| `username` | Common | Absent; when set, must be nonblank and accompanied by `password`; otherwise the selected resource supplies credentials |
+| `password` | Common | Absent; must be configured together with `username` |
+| `client-id` | Common | Absent; leaves the provider's client identifier unchanged. When set, must be nonblank and is applied to each channel connection |
+| `destination` | Common | Nonblank existing queue name; required in direct naming mode after inheritance |
+| `schema` | Common | Connected database user; when set, must be nonblank and selects the direct destination's owner |
+| `destination-type` | Common | `QUEUE`; use `TOPIC` for multi-consumer queues, including durable or explicit-recipient consumers |
+| `payload-type` | Common | `JMS`; alternatives are `ADT` and `XML` |
+| `transacted` | Common | `true`; use a channel-owned local transaction. With `false`, incoming settlement uses client acknowledgement and outgoing sends are individually visible |
+| `allow-object-messages` | Common | `false`; opt in to Java object serialization/deserialization only for trusted queues and classes |
+| `close-timeout` | Common | `PT10S`; graceful resource-cleanup wait, at least one millisecond |
+| `jndi.destination` | Common | Required nonblank lookup name within a configured `jndi` block |
+| `jndi.env-properties` | Common | Empty map; naming-provider defaults still apply. Keys must be nonblank and values non-null; values are omitted from configuration string representations |
+| `reconnect.enabled` | Common | `true`; recover established channels after recognized connection failures. Initial startup still makes one attempt |
+| `reconnect.initial-delay` | Common | `PT0.1S`; at least one millisecond before recovery, doubled after failed attempts |
+| `reconnect.max-delay` | Common | `PT30S`; positive maximum backoff including jitter, at least `reconnect.initial-delay` |
+| `reconnect.jitter` | Common | `0.2`; finite backoff variation fraction in the range `0` through `1` |
+| `reconnect.connect-timeout` | Common | `PT10S`; maximum wait for initial or recovery resource initialization, at least one millisecond |
+| `reconnect.wait-timeout` | Outgoing | `PT30S`; maximum wait for a recovered connection per send call, at least one millisecond; does not time an in-progress native send |
+
+At the same scope, `jndi` conflicts with direct `destination` or `schema`. A channel `jndi` block replaces the complete
+inherited block, including its environment, and selects JNDI mode. An explicit channel `destination` or `schema`
+selects direct mode; when switching from JNDI, a direct destination must be supplied. When both scopes use direct
+naming, destination and schema inherit independently. `destination-type` inherits independently in either mode.
+An explicit channel `reconnect` block replaces the whole connector recovery policy; omitted fields use the policy's
+defaults above.
+
+| Setting | Scope | Default and constraints |
+| --- | --- | --- |
+| `message-selector` | Incoming | Absent; when set, a nonblank provider selector using syntax supported for the queue's payload type |
+| `durable` | Incoming | `false`; `true` requires `destination-type: TOPIC` and `subscription-name` |
+| `subscription-name` | Incoming | Absent; a nonblank durable subscription name, allowed only with `durable: true` |
+| `recipient-name` | Incoming | Absent; a nonblank explicit AQ recipient, requires `TOPIC` and cannot be combined with durable subscriptions or `no-local: true` |
+| `no-local` | Incoming | `false`; requires `TOPIC` and excludes messages published by the receiving connection according to provider semantics |
+| `max-body-bytes` | Incoming | `1048576`; positive limit on each incoming bytes-message body and each detached SQL LOB value: bytes for BLOB, characters for CLOB/NCLOB |
+| `receive-timeout` | Incoming | `PT0.1S`; maximum duration of each receive call, at least one millisecond |
+
+Explicit channel `durable: false` also suppresses an inherited `subscription-name`. An explicitly supplied channel
+subscription name still requires durability. Each channel has its own connection, so `no-local` is not an
+application-wide filter for all outgoing channels sharing the same data source.
+
+| Setting | Scope | Default and constraints |
+| --- | --- | --- |
+| `delivery-mode` | Outgoing | `2` (persistent); `1` selects nonpersistent delivery, subject to Oracle queue support |
+| `priority` | Outgoing | `4`; integer in the range `0` through `9` |
+| `time-to-live` | Outgoing | `PT0S` (no expiry); otherwise at least one millisecond. Oracle AQ starts expiration when the message becomes ready |
+| `enqueue-transformation.name` | Outgoing | Existing Oracle transformation name; required when the policy is enabled, and must be nonblank whenever present |
+| `enqueue-transformation.enabled` | Outgoing | `true` within a configured policy; an absent policy applies no transformation, and `false` disables an inherited policy |
+
+An explicit channel `enqueue-transformation` policy replaces the whole connector policy. Incoming channels do not
+apply it. The selected transformation must satisfy the classic-AQ and database requirements described above.
+The programmatic builders also accept data-source and connection-factory instances and a `payloadConverter`;
+those object-valued settings have no configuration-file keys. Per-message delay, application ID and exception-queue
+controls use message metadata and the message builder methods described above, rather than channel configuration.
 
 ## Real database verification
 

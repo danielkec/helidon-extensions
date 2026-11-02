@@ -217,10 +217,13 @@ public final class AqMessage<T> implements Message<T> {
 
     /**
      * Create an outgoing message builder with an entity.
+     * Map entities require {@link #mapBuilder(Map)}. For a payload-only map message, use {@link #create(Map)}.
      *
      * @param entity non-null entity
      * @param <T> entity type
      * @return builder
+     * @throws IllegalArgumentException if the entity is a map
+     * @throws NullPointerException if the entity is {@code null}
      */
     public static <T> AqMessageConfig.Builder<T> builder(T entity) {
         if (entity instanceof Map<?, ?>) {
@@ -236,6 +239,7 @@ public final class AqMessage<T> implements Message<T> {
      * @param <K> key type
      * @param <V> value type
      * @return builder
+     * @throws NullPointerException if the entity is {@code null}
      */
     public static <K, V> AqMessageConfig.Builder<Map<K, V>> mapBuilder(Map<K, V> entity) {
         return AqMessage.<Map<K, V>>builder().entity(Objects.requireNonNull(entity));
@@ -243,10 +247,14 @@ public final class AqMessage<T> implements Message<T> {
 
     /**
      * Create an outgoing payload-only message.
+     * This overload rejects map entities. Use the {@link #create(Map) Map overload} or {@link #mapBuilder(Map)}
+     * so the envelope's entity type is the Map interface.
      *
      * @param entity non-null entity
      * @param <T> entity type
      * @return message
+     * @throws IllegalArgumentException if the entity is a map
+     * @throws NullPointerException if the entity is {@code null}
      */
     public static <T> AqMessage<T> create(T entity) {
         return builder(entity).build();
@@ -259,6 +267,7 @@ public final class AqMessage<T> implements Message<T> {
      * @param <K> key type
      * @param <V> value type
      * @return map message
+     * @throws NullPointerException if the entity is {@code null}
      */
     public static <K, V> AqMessage<Map<K, V>> create(Map<K, V> entity) {
         return mapBuilder(entity).build();
@@ -370,7 +379,8 @@ public final class AqMessage<T> implements Message<T> {
     }
 
     /**
-     * Provider expiration in milliseconds since the epoch.
+     * Received provider expiration in milliseconds since the epoch.
+     * Outgoing message lifetime is selected by the target channel's {@code time-to-live} setting.
      *
      * @return expiration
      */
@@ -379,7 +389,8 @@ public final class AqMessage<T> implements Message<T> {
     }
 
     /**
-     * Provider-assigned priority.
+     * Received provider-assigned priority.
+     * Outgoing sends use the target channel's {@code priority} setting.
      *
      * @return priority
      */
@@ -388,7 +399,8 @@ public final class AqMessage<T> implements Message<T> {
     }
 
     /**
-     * Provider delivery mode.
+     * Received provider delivery mode.
+     * Outgoing sends use the target channel's {@code delivery-mode} setting.
      *
      * @return delivery mode
      */
