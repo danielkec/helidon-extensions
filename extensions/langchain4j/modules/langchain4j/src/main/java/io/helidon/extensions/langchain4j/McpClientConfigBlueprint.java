@@ -23,12 +23,14 @@ import java.util.Optional;
 import io.helidon.builder.api.Option;
 import io.helidon.builder.api.Prototype;
 import io.helidon.common.tls.Tls;
+import io.helidon.webclient.api.WebClientConfig;
 
 /**
  * Configuration for LangChain4j MCP (Model Context Protocol) clients.
  */
 @Prototype.Configured
 @Prototype.Blueprint(decorator = McpClientSupport.McpClientDecorator.class)
+@Prototype.CustomMethods(McpClientSupport.class)
 interface McpClientConfigBlueprint {
 
     /**
@@ -54,12 +56,26 @@ interface McpClientConfigBlueprint {
     URI uri();
 
     /**
-     * TLS configuration for the MCP server connection.
+     * TLS configuration for the MCP server connection. When enabled, this overrides
+     * the TLS configuration in {@link #webClientConfig()}.
      *
      * @return tls configuration
      */
     @Option.Configured
     Optional<Tls> tls();
+
+    /**
+     * Native WebClient configuration, including services for security, context propagation,
+     * and tracing. The factory owns the WebClient created from this configuration.
+     * The default disables redirects and the read timeout for long-lived MCP streams,
+     * and uses a 60-second connect timeout. Configuring individual native properties
+     * preserves these MCP defaults for properties that are not specified.
+     *
+     * @return configuration of the MCP HTTP client
+     */
+    @Option.Configured("web-client")
+    @Option.DefaultCode("McpClientSupport.defaultWebClientConfig()")
+    WebClientConfig webClientConfig();
 
     /**
      * Sets the name that the client will use to identify itself to the

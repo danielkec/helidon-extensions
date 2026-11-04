@@ -33,7 +33,6 @@ import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -41,8 +40,6 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import io.helidon.common.context.Context;
-import io.helidon.common.context.Contexts;
 import io.helidon.security.SecurityContext;
 import io.helidon.tracing.SpanContext;
 import io.helidon.webserver.WebServer;
@@ -55,7 +52,6 @@ import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.mcp.client.DefaultMcpClient;
 import dev.langchain4j.mcp.client.McpClient;
 import dev.langchain4j.mcp.client.transport.http.StreamableHttpMcpTransport;
-import dev.langchain4j.spi.CapturedContext;
 import dev.langchain4j.spi.ExecutorProvider;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.sdk.trace.data.SpanData;
@@ -88,20 +84,10 @@ class HelidonMcpKeycloakIT {
     private ExecutorProvider previousProvider;
 
     @BeforeEach
-    void installContextCapture() {
+    void useDiscoveredContextCapture() {
         previousProvider = ExecutorProvider.get();
-        ExecutorProvider.set(new ExecutorProvider() {
-            @Override
-            public Executor executor() {
-                return null; // Context capture only; retain LangChain4j's default executor.
-            }
-
-            @Override
-            public CapturedContext captureContext() {
-                Context captured = Contexts.context().orElseGet(Context::create);
-                return task -> () -> Contexts.runInContext(captured, task);
-            }
-        });
+        // Exercise the production provider discovered from this module.
+        ExecutorProvider.set(null);
     }
 
     @AfterEach

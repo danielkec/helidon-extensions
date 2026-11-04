@@ -59,7 +59,7 @@ import dev.langchain4j.http.client.sse.ServerSentEventListener;
 import dev.langchain4j.http.client.sse.ServerSentEventParser;
 
 /**
- * An opt-in LangChain4j HTTP client backed by a configured Helidon WebClient.
+ * A LangChain4j HTTP client backed by a configured Helidon WebClient.
  * The WebClient is owned by the caller; closing this adapter only cancels its in-flight requests.
  * Each streaming subscription uses a virtual thread for WebClient's blocking response body API.
  */

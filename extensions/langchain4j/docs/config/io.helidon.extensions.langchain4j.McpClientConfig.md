@@ -18,6 +18,15 @@ Configuration for LangChain4j MCP (Model Context Protocol) clients
 <tbody>
 <tr>
 <td>
+<code>web-<wbr>client</code>
+</td>
+<td>
+<code>WebClientConfig</code>
+</td>
+<td>Native Helidon WebClient configuration, including services, TLS and timeouts. Defaults to a 60-second connect timeout, no read timeout and no redirects. The factory owns the WebClient created from this configuration.</td>
+</tr>
+<tr>
+<td>
 <code>ping-<wbr>timeout</code>
 </td>
 <td>
@@ -116,7 +125,7 @@ Configuration for LangChain4j MCP (Model Context Protocol) clients
 <td>
 <code>Tls</code>
 </td>
-<td>TLS configuration for the MCP server connection</td>
+<td>TLS configuration for the MCP server connection. When enabled, overrides web-client.tls.</td>
 </tr>
 <tr>
 <td>

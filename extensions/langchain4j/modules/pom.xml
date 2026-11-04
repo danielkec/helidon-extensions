@@ -33,17 +33,9 @@
 
     <modules>
         <module>codegen</module>
+        <module>http-client</module>
         <module>langchain4j</module>
         <module>providers</module>
     </modules>
 
-    <profiles>
-        <profile>
-            <!-- Requires the MCP HTTP client SPI changes in LangChain4j PR #6726. -->
-            <id>http-client</id>
-            <modules>
-                <module>http-client</module>
-            </modules>
-        </profile>
-    </profiles>
 </project>

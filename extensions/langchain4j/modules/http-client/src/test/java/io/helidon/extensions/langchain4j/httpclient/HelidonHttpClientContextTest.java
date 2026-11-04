@@ -25,7 +25,6 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -39,7 +38,6 @@ import dev.langchain4j.mcp.client.transport.McpOperationHandler;
 import dev.langchain4j.mcp.client.transport.http.StreamableHttpMcpTransport;
 import dev.langchain4j.mcp.protocol.McpInitializeRequest;
 import dev.langchain4j.mcp.protocol.McpListToolsRequest;
-import dev.langchain4j.spi.CapturedContext;
 import dev.langchain4j.spi.ExecutorProvider;
 import io.helidon.common.context.Context;
 import io.helidon.common.context.Contexts;
@@ -75,7 +73,7 @@ class HelidonHttpClientContextTest {
     }
 
     @Test
-    void captured_context_keeps_connection_and_request_headers_isolated() throws Exception {
+    void discovered_provider_keeps_connection_and_request_headers_isolated() throws Exception {
         runScenario(true);
     }
 
@@ -86,18 +84,8 @@ class HelidonHttpClientContextTest {
 
     private static void runScenario(boolean captureContext) throws Exception {
         if (captureContext) {
-            ExecutorProvider.set(new ExecutorProvider() {
-                @Override
-                public Executor executor() {
-                    return null; // Context capture only; retain LangChain4j's default executor.
-                }
-
-                @Override
-                public CapturedContext captureContext() {
-                    Context captured = Contexts.context().orElseGet(Context::create);
-                    return task -> () -> Contexts.runInContext(captured, task);
-                }
-            });
+            // Exercise the production provider discovered from this module.
+            ExecutorProvider.set(null);
         } else {
             // Disable capture explicitly even if a provider is discovered through ServiceLoader.
             ExecutorProvider.set(() -> null);

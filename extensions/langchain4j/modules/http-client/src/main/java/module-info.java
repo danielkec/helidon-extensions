@@ -15,17 +15,20 @@
  */
 
 /**
- * Opt-in LangChain4j HTTP client backed by Helidon WebClient.
+ * LangChain4j HTTP client backed by Helidon WebClient, with Helidon context propagation.
  */
 module io.helidon.extensions.langchain4j.httpclient {
     requires transitive io.helidon.builder.api;
     requires transitive io.helidon.webclient.api;
     requires transitive langchain4j.http.client;
+    requires transitive langchain4j.core;
     requires io.helidon.common;
     requires io.helidon.common.context;
     requires io.helidon.http;
     requires io.helidon.webclient;
-    requires langchain4j.core;
 
     exports io.helidon.extensions.langchain4j.httpclient;
+
+    provides dev.langchain4j.spi.ExecutorProvider
+            with io.helidon.extensions.langchain4j.httpclient.HelidonExecutorProvider;
 }

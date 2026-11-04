@@ -235,6 +235,45 @@ langchain4j:
 ```
 <!--@mdc :: -->
 
+### MCP HTTP Clients
+
+Configured MCP clients use Helidon WebClient for Streamable HTTP connections.
+Configure its native services, TLS and timeouts under the client's `web-client`
+node. MCP defaults to a 60-second connect timeout, no read timeout for
+long-lived streams, and no redirects; explicit native options override these
+defaults. For example, to propagate the authenticated inbound bearer token and
+create outbound tracing spans:
+
+```yaml [application.yaml]
+langchain4j:
+  mcp-clients:
+    tools:
+      uri: https://tools.example.com/mcp
+      web-client:
+        services:
+          context:
+            records:
+              - header: Authorization
+                classifier: inboundAuthorization
+          tracing: {}
+```
+
+Add `io.helidon.webclient:helidon-webclient-context` for header propagation and
+`io.helidon.webclient:helidon-webclient-tracing` with your tracing provider for
+tracing. Configure the inbound server's `ContextFeature` with the same header
+and classifier, and its tracing observer as usual. The client uses native
+Helidon context and tracing services; no MCP header supplier is needed.
+The integration captures the caller's Helidon Context before MCP defers work
+for initialization or retries, preserving each caller's identity and trace.
+
+Existing MCP-level `tls` configuration remains supported and, when enabled,
+overrides `web-client.tls`. The service registry closes the MCP clients and HTTP
+resources it creates during shutdown. Applications using the HTTP adapter
+directly can supply an existing WebClient and retain ownership of it.
+
+See the [HTTP client module](../modules/http-client/README.md) for direct adapter
+usage and the bearer/tracing integration test.
+
 ### Configuration Migration Guide
 
 > [!WARNING]

@@ -21,6 +21,8 @@ import java.time.Duration;
 
 import io.helidon.common.tls.Tls;
 import io.helidon.config.Config;
+import io.helidon.webclient.api.WebClientConfig;
+import io.helidon.webclient.context.WebClientContextService;
 
 import org.junit.jupiter.api.Test;
 
@@ -112,5 +114,67 @@ public class McpClientConfigTest {
         var mcpClientConfig = McpClientFactory.configure(c).findFirst().get();
         assertThat(mcpClientConfig.uri(), is(URI.create("http://localhost:9999/cli")));
         assertThat(mcpClientConfig.key(), optionalValue(is("different-cli-tools-mcp-server")));
+    }
+
+    @Test
+    void testWebClientDefaults() {
+        var config = McpClientConfig.builder()
+                .uri(URI.create("http://localhost/mcp"))
+                .build()
+                .webClientConfig();
+        assertThat(config.followRedirects(), is(false));
+        assertThat(config.connectTimeout(), optionalValue(is(Duration.ofSeconds(60))));
+        assertThat(config.readTimeout(), optionalValue(is(Duration.ZERO)));
+    }
+
+    @Test
+    void testNativeServicesPreserveMcpDefaults() {
+        var config = McpClientConfig.create(Config.just("""
+                uri: http://localhost/mcp
+                web-client:
+                  default-headers:
+                    X-Client: configured
+                  services:
+                    context:
+                      records:
+                        - header: Authorization
+                          classifier: bearer
+                """, APPLICATION_YAML));
+        assertThat(config.webClientConfig().defaultHeadersMap().get("X-Client"), is("configured"));
+        assertThat(config.webClientConfig().services().size(), is(1));
+        var contextService = (WebClientContextService) config.webClientConfig().services().getFirst();
+        assertThat(contextService.prototype().records().size(), is(1));
+        assertThat(contextService.prototype().records().getFirst().classifier(), optionalValue(is("bearer")));
+        assertThat(config.webClientConfig().followRedirects(), is(false));
+        assertThat(config.webClientConfig().connectTimeout(), optionalValue(is(Duration.ofSeconds(60))));
+        assertThat(config.webClientConfig().readTimeout(), optionalValue(is(Duration.ZERO)));
+    }
+
+    @Test
+    void testNativeTimeoutAndRedirectOverrides() {
+        var config = McpClientConfig.create(Config.just("""
+                uri: http://localhost/mcp
+                web-client:
+                  connect-timeout: PT5S
+                  read-timeout: PT20S
+                  follow-redirects: true
+                """, APPLICATION_YAML));
+        assertThat(config.webClientConfig().followRedirects(), is(true));
+        assertThat(config.webClientConfig().connectTimeout(), optionalValue(is(Duration.ofSeconds(5))));
+        assertThat(config.webClientConfig().readTimeout(), optionalValue(is(Duration.ofSeconds(20))));
+    }
+
+    @Test
+    void testProgrammaticNativeConfiguration() {
+        var config = McpClientConfig.builder()
+                .uri(URI.create("http://localhost/mcp"))
+                .webClientConfig(WebClientConfig.builder()
+                        .connectTimeout(Duration.ofSeconds(4))
+                        .readTimeout(Duration.ZERO)
+                        .followRedirects(false)
+                        .buildPrototype())
+                .build();
+        assertThat(config.webClientConfig().connectTimeout(), optionalValue(is(Duration.ofSeconds(4))));
+        assertThat(config.webClientConfig().readTimeout(), optionalValue(is(Duration.ZERO)));
     }
 }
