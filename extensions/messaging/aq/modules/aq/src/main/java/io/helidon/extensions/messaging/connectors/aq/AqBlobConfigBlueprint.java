@@ -18,10 +18,12 @@ package io.helidon.extensions.messaging.connectors.aq;
 
 import io.helidon.builder.api.Option;
 import io.helidon.builder.api.Prototype;
+import io.helidon.common.Api;
 
 /**
  * Construction options for a detached SQL BLOB.
  */
+@Api.Incubating
 @Prototype.Blueprint
 @Prototype.Sealed
 @Prototype.CustomMethods(AqBlobSupport.class)

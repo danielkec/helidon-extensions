@@ -18,11 +18,14 @@ package io.helidon.extensions.messaging.connectors.aq;
 
 import java.util.Objects;
 
+import io.helidon.common.Api;
+
 /**
  * Detached SQL BLOB attribute in an {@link AqAdt} object or array.
  * Unlike a plain byte array, this value preserves the SQL BLOB type when forwarded.
  * The content is defensively copied and holds no JDBC resources.
  */
+@Api.Incubating
 public final class AqBlob {
     private final byte[] bytes;
 

@@ -19,6 +19,8 @@ package io.helidon.extensions.messaging.connectors.aq;
 import java.util.List;
 import java.util.Objects;
 
+import io.helidon.common.Api;
+
 /**
  * Detached Oracle SQL object, or a named SQL array nested inside an object.
  * Attribute values support scalar JDBC values, byte arrays, nested {@code AqAdt}
@@ -26,6 +28,7 @@ import java.util.Objects;
  * SQL NULL is represented by {@link NullValue#INSTANCE}.
  * Mutable binary and temporal values are defensively copied.
  */
+@Api.Incubating
 public final class AqAdt {
     private final String typeName;
     private final List<Object> attributes;
@@ -84,6 +87,7 @@ public final class AqAdt {
     /**
      * SQL value shapes.
      */
+    @Api.Incubating
     public enum Kind {
         /** SQL object with ordered attributes. */
         STRUCT,
@@ -94,6 +98,7 @@ public final class AqAdt {
     /**
      * Representation of a SQL NULL attribute.
      */
+    @Api.Incubating
     public enum NullValue {
         /** SQL NULL. */
         INSTANCE

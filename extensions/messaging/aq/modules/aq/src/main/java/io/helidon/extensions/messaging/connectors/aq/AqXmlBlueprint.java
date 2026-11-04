@@ -17,10 +17,12 @@
 package io.helidon.extensions.messaging.connectors.aq;
 
 import io.helidon.builder.api.Prototype;
+import io.helidon.common.Api;
 
 /**
  * Detached XML payload for an AQ queue whose payload type is {@code SYS.XMLTYPE}.
  */
+@Api.Incubating
 @Prototype.Blueprint
 @Prototype.Sealed
 interface AqXmlBlueprint {

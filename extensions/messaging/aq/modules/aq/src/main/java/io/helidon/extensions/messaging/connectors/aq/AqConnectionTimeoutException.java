@@ -19,6 +19,10 @@ package io.helidon.extensions.messaging.connectors.aq;
 import io.helidon.messaging.MessagingException;
 
 final class AqConnectionTimeoutException extends MessagingException {
+    AqConnectionTimeoutException(String message) {
+        super(message);
+    }
+
     AqConnectionTimeoutException(String message, Throwable cause) {
         super(message, cause);
     }

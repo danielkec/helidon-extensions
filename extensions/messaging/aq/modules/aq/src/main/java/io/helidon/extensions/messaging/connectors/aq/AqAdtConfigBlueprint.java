@@ -20,10 +20,12 @@ import java.util.List;
 
 import io.helidon.builder.api.Option;
 import io.helidon.builder.api.Prototype;
+import io.helidon.common.Api;
 
 /**
  * Construction options for detached Oracle SQL values.
  */
+@Api.Incubating
 @Prototype.Blueprint
 @Prototype.Sealed
 @Prototype.CustomMethods(AqAdtSupport.class)
@@ -40,7 +42,7 @@ interface AqAdtConfigBlueprint extends Prototype.Factory<AqAdt> {
      *
      * @return values
      */
-    @Option.Singular("attribute")
+    @Option.Singular
     List<Object> attributes();
 
     /**

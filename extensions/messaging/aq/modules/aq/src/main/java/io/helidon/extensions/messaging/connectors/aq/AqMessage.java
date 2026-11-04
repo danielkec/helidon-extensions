@@ -29,6 +29,7 @@ import javax.jms.JMSException;
 import javax.jms.Queue;
 import javax.jms.Topic;
 
+import io.helidon.common.Api;
 import io.helidon.messaging.Message;
 import io.helidon.messaging.MessageHeaders;
 import io.helidon.messaging.MessageMetadata;
@@ -51,6 +52,7 @@ import oracle.jms.AdtMessage;
  *
  * @param <T> payload type
  */
+@Api.Incubating
 public final class AqMessage<T> implements Message<T> {
     /**
      * Local metadata entry controlling the delay before an outgoing message becomes available for dequeue.

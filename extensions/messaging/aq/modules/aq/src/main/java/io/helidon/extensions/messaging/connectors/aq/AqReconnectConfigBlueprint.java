@@ -28,7 +28,7 @@ import io.helidon.common.Api;
 @Api.Incubating
 @Prototype.Blueprint(decorator = AqReconnectSupport.BuilderDecorator.class)
 @Prototype.Sealed
-@Prototype.Configured(root = false)
+@Prototype.Configured
 interface AqReconnectConfigBlueprint {
     /**
      * Reconnect established channels after recoverable provider connection failures.

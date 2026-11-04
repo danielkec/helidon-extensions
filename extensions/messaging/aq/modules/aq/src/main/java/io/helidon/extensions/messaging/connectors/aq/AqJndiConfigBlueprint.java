@@ -28,7 +28,7 @@ import io.helidon.common.Api;
 @Api.Incubating
 @Prototype.Blueprint(decorator = AqJndiSupport.BuilderDecorator.class, createEmptyPublic = false)
 @Prototype.Sealed
-@Prototype.Configured(root = false)
+@Prototype.Configured
 interface AqJndiConfigBlueprint {
     /**
      * Required nonblank JNDI name of a {@link javax.jms.Destination}.

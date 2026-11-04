@@ -16,6 +16,8 @@
 
 package io.helidon.extensions.messaging.connectors.aq;
 
+import io.helidon.common.Api;
+
 /**
  * Converts application values to and from the connector's detached payload types.
  * The connector invokes this converter while it owns transport resources.
@@ -26,6 +28,7 @@ package io.helidon.extensions.messaging.connectors.aq;
  * maps read from or written to the transport. Message envelopes copy the map structure and byte-array
  * values, while retaining keys and other values, which must remain stable.
  */
+@Api.Incubating
 public interface AqPayloadConverter {
     /**
      * Convert an incoming detached native payload to an application value.

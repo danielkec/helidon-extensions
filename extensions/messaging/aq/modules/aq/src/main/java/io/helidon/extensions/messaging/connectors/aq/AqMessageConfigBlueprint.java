@@ -22,6 +22,7 @@ import java.util.Optional;
 
 import io.helidon.builder.api.Option;
 import io.helidon.builder.api.Prototype;
+import io.helidon.common.Api;
 import io.helidon.messaging.MessageHeaderValue;
 
 /**
@@ -29,6 +30,7 @@ import io.helidon.messaging.MessageHeaderValue;
  *
  * @param <T> entity type
  */
+@Api.Incubating
 @Prototype.Blueprint(decorator = AqMessageSupport.BuilderDecorator.class)
 @Prototype.Sealed
 @Prototype.CustomMethods(AqMessageSupport.class)
@@ -51,7 +53,7 @@ interface AqMessageConfigBlueprint<T> extends Prototype.Factory<AqMessage<T>> {
      * @return local metadata
      */
     @Option.Confidential
-    @Option.Singular(value = "localMetadata", withPrefix = false)
+    @Option.Singular(withPrefix = false)
     Map<String, MessageHeaderValue> localMetadata();
 
     /**
@@ -103,6 +105,6 @@ interface AqMessageConfigBlueprint<T> extends Prototype.Factory<AqMessage<T>> {
      *
      * @return recipients
      */
-    @Option.Singular("recipient")
+    @Option.Singular
     List<AqRecipient> recipients();
 }

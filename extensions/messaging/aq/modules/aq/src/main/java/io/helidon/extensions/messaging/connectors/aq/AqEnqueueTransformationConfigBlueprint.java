@@ -28,7 +28,7 @@ import io.helidon.common.Api;
 @Api.Incubating
 @Prototype.Blueprint(decorator = AqEnqueueTransformationSupport.BuilderDecorator.class, createEmptyPublic = false)
 @Prototype.Sealed
-@Prototype.Configured(root = false)
+@Prototype.Configured
 interface AqEnqueueTransformationConfigBlueprint {
     /**
      * Name of the existing database transformation, required when enabled.

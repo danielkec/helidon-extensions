@@ -18,12 +18,14 @@ package io.helidon.extensions.messaging.connectors.aq;
 
 import io.helidon.builder.api.Option;
 import io.helidon.builder.api.Prototype;
+import io.helidon.common.Api;
 
 /**
  * Detached SQL CLOB or NCLOB attribute in an {@link AqAdt} object or array.
  * Unlike a plain string, this value preserves its SQL LOB type when forwarded.
  * The content is immutable and holds no JDBC resources.
  */
+@Api.Incubating
 @Prototype.Blueprint
 @Prototype.Sealed
 interface AqClobBlueprint {
