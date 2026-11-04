@@ -19,6 +19,41 @@ info:
   title: Cascading Validation API
   version: "1.0"
 paths:
+  /required-composition:
+    post:
+      operationId: acceptRequiredComposition
+      tags: [requiredComposition]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RequiredCompositionEnvelope'}
+      responses:
+        '204': {description: Accepted}
+  /required:
+    post:
+      operationId: acceptRequiredEnvelope
+      tags: [requiredFields]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RequiredEnvelope'}
+      responses:
+        '204': {description: Accepted}
+  /validate-polymorphic:
+    post:
+      operationId: validatePolymorphic
+      tags: [validation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolymorphicRecord'
+      responses:
+        "204":
+          description: Valid
   /validate:
     post:
       operationId: validateGraph
@@ -77,6 +112,76 @@ paths:
           description: Valid
 components:
   schemas:
+    PolymorphicRecord:
+      type: object
+      required: [kind, compartmentId]
+      discriminator:
+        propertyName: kind
+        mapping:
+          CAPPED: '#/components/schemas/CappedRecord'
+          OPEN: '#/components/schemas/OpenRecord'
+          DEEP: '#/components/schemas/DeepRecord'
+      properties:
+        kind:
+          type: string
+        compartmentId:
+          type: string
+          minLength: 3
+        baseLeaf:
+          $ref: '#/components/schemas/ConstrainedLeaf'
+    CollectionRecord:
+      allOf:
+        - $ref: '#/components/schemas/PolymorphicRecord'
+        - type: object
+          properties:
+            values:
+              type: array
+              maxItems: 255
+              items:
+                type: string
+            label:
+              type: string
+              minLength: 2
+      discriminator:
+        propertyName: kind
+        mapping:
+          CAPPED: '#/components/schemas/CappedRecord'
+          DEEP: '#/components/schemas/DeepRecord'
+    CappedRecord:
+      allOf:
+        - $ref: '#/components/schemas/CollectionRecord'
+        - type: object
+    OpenRecord:
+      allOf:
+        - $ref: '#/components/schemas/PolymorphicRecord'
+        - type: object
+          properties:
+            note:
+              type: string
+    DeepRecord:
+      allOf:
+        - $ref: '#/components/schemas/CollectionRecord'
+        - type: object
+          properties:
+            suffix:
+              type: string
+              minLength: 2
+    PolymorphicHolder:
+      type: object
+      required: [direct]
+      properties:
+        direct:
+          $ref: '#/components/schemas/PolymorphicRecord'
+        nullableRecord:
+          $ref: '#/components/schemas/PolymorphicRecord'
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolymorphicRecord'
+        recordsByName:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/PolymorphicRecord'
     ValidationRoot:
       type: object
       required: [intermediate]
@@ -145,3 +250,105 @@ components:
         label:
           type: string
           minLength: 2
+    RequiredEnvelope:
+      type: object
+      required: [details]
+      properties:
+        details: {$ref: '#/components/schemas/RequiredLeaf'}
+    RequiredLeaf:
+      type: object
+      required: [moduleName, count, enabled, labels, attributes, nullableLabel]
+      properties:
+        moduleName: {type: string}
+        count: {type: integer, format: int32}
+        enabled: {type: boolean}
+        labels: {type: array, items: {type: string}}
+        attributes: {type: object, additionalProperties: {type: string}}
+        nullableLabel: {type: string, nullable: true}
+        optionalLabel: {type: string, nullable: true}
+        optionalPlain: {type: string}
+
+    RequiredCodeBase:
+      type: object
+      required: [kind, code]
+      discriminator:
+        propertyName: kind
+        mapping:
+          NULLABLE_CHILD: '#/components/schemas/NullableCodeChild'
+      properties:
+        kind: {type: string}
+        code: {type: string}
+    NullableCodeChild:
+      allOf:
+        - $ref: '#/components/schemas/RequiredCodeBase'
+        - type: object
+          properties:
+            code: {type: string, nullable: true}
+    OptionalCodeBase:
+      type: object
+      properties:
+        code: {type: string, minLength: 1}
+    StrengthenedCodeChild:
+      allOf:
+        - $ref: '#/components/schemas/OptionalCodeBase'
+        - type: object
+          required: [code]
+    OptionalCodeSibling:
+      allOf:
+        - $ref: '#/components/schemas/OptionalCodeBase'
+        - type: object
+    RequiredCodeGrandchild:
+      allOf:
+        - $ref: '#/components/schemas/StrengthenedCodeChild'
+        - type: object
+    NullableCodeBase:
+      type: object
+      required: [code]
+      properties:
+        code: {type: string, nullable: true}
+    NullableCodeControlChild:
+      allOf:
+        - $ref: '#/components/schemas/NullableCodeBase'
+        - type: object
+          properties:
+            code: {type: string, nullable: true}
+    RequiredCompositionEnvelope:
+      type: object
+      required: [strict, inherited, grandchild, nullable, object, nullableInherited]
+      properties:
+        nullableInherited: {$ref: '#/components/schemas/RequiredNullableCodeChild'}
+        object: {$ref: '#/components/schemas/NullableObjectChild'}
+        strict: {$ref: '#/components/schemas/NullableCodeChild'}
+        inherited: {$ref: '#/components/schemas/StrengthenedCodeChild'}
+        grandchild: {$ref: '#/components/schemas/RequiredCodeGrandchild'}
+        nullable: {$ref: '#/components/schemas/NullableCodeControlChild'}
+
+    CompositionLeaf:
+      type: object
+      required: [value]
+      properties:
+        value: {type: string}
+    RequiredObjectBase:
+      type: object
+      required: [details]
+      properties:
+        details: {$ref: '#/components/schemas/CompositionLeaf'}
+    NullableObjectChild:
+      allOf:
+        - $ref: '#/components/schemas/RequiredObjectBase'
+        - type: object
+          properties:
+            details:
+              allOf:
+                - $ref: '#/components/schemas/CompositionLeaf'
+              nullable: true
+
+    OptionalNullableCodeBase:
+      type: object
+      properties:
+        code: {type: string, nullable: true}
+    RequiredNullableCodeChild:
+      allOf:
+        - $ref: '#/components/schemas/OptionalNullableCodeBase'
+        - type: object
+          required: [code]

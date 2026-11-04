@@ -113,7 +113,7 @@ OpenAPI document
 
 This stage extracts global metadata before per-operation processing:
 
-- server base path from `servers[0].url`
+- server base path from `servers[0].url`, unless `serverBasePath` (or legacy `serveBasePath`) overrides it
 - top-level security requirements
 - YAML serialization of the source spec for generated `META-INF/openapi.yaml`
 
@@ -180,11 +180,20 @@ Notable behavior:
 
 This stage performs per-tag aggregation and template shaping:
 
-- computes the shared tag-level base path
-- determines method sub-paths
+- computes the common operation path for each tag, then prepends the configured or derived server base path
+- determines method sub-paths relative to the common operation path, without repeating the server prefix
 - tracks whether optional query params, validation, multipart, form, or security are present
 - identifies generated error model usage
 - exposes tag-level booleans used by the Mustache templates
+
+The resulting `helidonBasePath` supplies the shared API interface's class-level
+`@Http.Path`. Generated endpoints and clients inherit this annotation, matching
+Helidon's class-path and method-path composition. The `serverBasePath` override
+changes this route prefix during generation and replaces server URL paths in a
+copy of the published OpenAPI document, preserving origins and unrelated metadata.
+The caller's input document is unchanged. See
+[Overriding the context path](README.md#overriding-the-context-path) for configuration
+examples.
 
 ## Templates
 
@@ -319,10 +328,30 @@ by directly constrained models. It marks cascade boundaries at the nested model 
 supported wrappers, collections, map values, and arrays, and repeats inherited `allOf`
 validation on concrete child accessors. Same-name property constraints are merged across
 the raw `allOf` contract because OpenAPI Generator can discard an earlier member's bounds.
+For Swagger 2 it recovers required lists from the original input because v2-to-v3 conversion
+can discard required-only allOf members. It also unions inherited required lists and intersects nullability, including requirements
+that occur without a property redeclaration. Inherited validation properties are cloned per
+child so annotations cannot leak to parents or siblings. Effective flags control both native
+validation and accessor shape. Required narrowing of an inherited Optional model fails before
+rendering because neither an empty Optional nor an incompatible override preserves the contract.
 Map keys are ignored. Nullable direct-model and request boundaries, unsupported custom
 containers, constrained-union property/request boundaries, and cycles in the effective
 local-plus-inherited validation graph fail before templates render.
 Non-participating recursive models remain supported.
+
+For generated abstract discriminator/allOf bases with constrained descendants, the
+fixed point also includes the base and its descendants. A nested weighted native
+`TypeValidator<Base>` service dispatches object checks to the concrete generated
+validator through `ServiceRegistry`, without eagerly constructing descendant
+validators. It preserves the caller's `ValidationContext`; property-only checks
+without an instance delegate to a nested native field-based property metadata
+validator, without allocating a metadata instance or copying values. Abstract-base
+accessors omit constraint and cascade annotations so Service Codegen does not try
+to instantiate a concrete interceptor that lacks abstract discriminator methods.
+Concrete children still repeat the complete inherited constraints. The dispatcher is part
+of the model template so model-only generation does not require supporting files.
+The recursion guard includes base-to-runtime-subtype edges as well as ordinary
+cascade edges. Constrained union interfaces remain unsupported.
 
 ## Testing Strategy
 

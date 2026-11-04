@@ -19,7 +19,6 @@ package io.helidon.openapi.generator;
 import java.io.File;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,10 +34,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import io.swagger.v3.core.util.Yaml;
+import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.servers.Server;
+import org.apache.commons.text.StringEscapeUtils;
 import org.openapitools.codegen.CodegenComposedSchemas;
 import org.openapitools.codegen.CodegenModel;
 import org.openapitools.codegen.CodegenOperation;
@@ -197,7 +199,7 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
                 "Copy spec to META-INF/openapi.yaml and add helidon-openapi dependency",
                 String.valueOf(serverOpenApi));
         addOption(OPT_SERVER_BASE_PATH,
-                "Base path prefix to add in front of all endpoint paths (e.g. /v1)",
+                "Overrides the specification server path for generated routes and OpenAPI; use / for no prefix",
                 serverBasePath);
         addOption(OPT_CORS_ENABLED,
                 "Add @Cors.Defaults to every endpoint class (enables CORS via application.yaml configuration)",
@@ -221,6 +223,20 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
         addOption(OPT_DISCRIMINATOR_REPRESENTATION,
                 "Represent discriminators as metadata or a derived read-only property",
                 "schema-driven");
+    }
+
+    /**
+     * Preserves schema regex semantics until a Java annotation literal is emitted.
+     *
+     * OpenAPI Generator also invokes this hook for schemas without a pattern;
+     * its inherited null-in/null-out contract is preserved.
+     *
+     * @param pattern regular expression from the schema, or {@code null} when absent
+     * @return unescaped regular expression, or {@code null} when absent
+     */
+    @Override
+    public String toRegularExpression(String pattern) {
+        return pattern;
     }
 
     // Metadata
@@ -385,39 +401,36 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
         };
     }
 
-    // Spec pre-processing: extract server base path
+    /**
+     * Prepares schema metadata and the default endpoint prefix from the first top-level server unless configured.
+     * Publication reflects configured server variable values and explicit path overrides.
+     *
+     * @param openAPI specification to generate
+     */
     @Override
-    public void preprocessOpenAPI(io.swagger.v3.oas.models.OpenAPI openAPI) {
+    public void preprocessOpenAPI(OpenAPI openAPI) {
         jsonStringEnums.preprocess(openAPI);
         captureRawDiscriminatorMappings(openAPI);
-        allOfValidationSnapshot = AllOfValidationSupport.snapshot(openAPI);
+        allOfValidationSnapshot = AllOfValidationSupport.snapshot(openAPI, inputSpec);
         super.preprocessOpenAPI(openAPI);
         globalSecurityRequirements = openAPI.getSecurity() == null
                 ? List.of()
                 : new ArrayList<>(openAPI.getSecurity());
 
-        if (openAPI.getServers() != null && !openAPI.getServers().isEmpty()) {
-            String serverUrl = openAPI.getServers().get(0).getUrl();
-            try {
-                URI uri = new URI(serverUrl);
-                String path = uri.getPath();
-                if (path != null && !path.isEmpty() && !"/".equals(path)) {
-                    // Only set serverBasePath from URL if not explicitly configured
-                    if (serverBasePath.isEmpty()) {
-                        additionalProperties.put("serverBasePath", path);
-                    }
-                }
-            } catch (Exception ignored) {
-                // Malformed URL — skip
-            }
-        }
+        String path = serverBasePath.isEmpty()
+                ? ServerBasePathSupport.path(openAPI.getServers(), serverVariableOverrides())
+                : ServerBasePathSupport.normalize(serverBasePath);
+        additionalProperties.put(OPT_SERVER_BASE_PATH, path);
 
         // Serialize the spec so the openapi.yaml.mustache template can write it to
         // src/main/resources/META-INF/openapi.yaml (picked up by helidon-openapi at runtime)
         if (serverOpenApi) {
             try {
-                String yamlContent = io.swagger.v3.core.util.Yaml.pretty()
-                        .writeValueAsString(openAPI);
+                OpenAPI published = serverBasePath.isEmpty() && serverVariableOverrides().isEmpty()
+                        ? openAPI
+                        : ServerBasePathSupport.publishedDocument(openAPI, serverBasePath.isEmpty() ? "" : path,
+                                                                  serverVariableOverrides());
+                String yamlContent = Yaml.pretty().writeValueAsString(published);
                 additionalProperties.put("x-openapi-spec-yaml", yamlContent);
             } catch (Exception ignored) {
                 // Serialization failed — spec file will be skipped
@@ -520,7 +533,16 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
         return model;
     }
 
-    // Per-operation enrichment
+    /**
+     * Enriches the operation contract and resolves its route with operation, path-item, then root server precedence.
+     * An explicit server base path replaces the prefix at every scope.
+     *
+     * @param path specification operation path
+     * @param httpMethod HTTP method
+     * @param operation specification operation
+     * @param servers path-item servers, or {@code null} when inherited
+     * @return enriched operation with its effective route
+     */
     @Override
     public CodegenOperation fromOperation(String path,
                                           String httpMethod,
@@ -528,6 +550,13 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
                                           List<Server> servers) {
         CodegenOperation op = super.fromOperation(path, httpMethod, operation, servers);
         jsonStringEnums.restoreInlineRequestEntityEnum(path, httpMethod, op);
+
+        String prefix = additionalProperties.getOrDefault(OPT_SERVER_BASE_PATH, "/").toString();
+        if (serverBasePath.isEmpty()) {
+            prefix = ServerBasePathSupport.operationPrefix(operation, servers, serverVariableOverrides(), prefix);
+        }
+        op.vendorExtensions.put("x-helidon-operation-path",
+                                "/".equals(prefix) ? op.path : prefix + ("/".equals(op.path) ? "" : op.path));
 
         // HTTP method annotation string (e.g. "@Http.GET")
         op.vendorExtensions.put("x-http-annotation", "@Http." + httpMethod.toUpperCase());
@@ -667,7 +696,13 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
         return op;
     }
 
-    // Per-tag post-processing: compute paths, error model, optional-param flags
+    /**
+     * Splits effective operation routes into a shared class path and method suffix, applying each server prefix once.
+     *
+     * @param objs operations grouped by tag
+     * @param allModels generated models
+     * @return enriched operations and template properties
+     */
     @Override
     public OperationsMap postProcessOperationsWithModels(OperationsMap objs,
                                                          List<ModelMap> allModels) {
@@ -682,8 +717,8 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
         // NOTE: "basePath" is already used by additionalProperties (full server URL) and
         // would be overridden when DefaultGenerator merges additionalProperties into the
         // template context. Use a Helidon-specific key instead.
-        String commonPath = computeCommonPath(opList);
-        result.put("helidonBasePath", commonPath);
+        String commonPath = ServerBasePathSupport.commonPath(opList);
+        result.put("helidonBasePath", StringEscapeUtils.escapeJava(commonPath));
 
         // Per-operation: method-level sub-path and other enrichments
         boolean anyComputedHeaders = false;
@@ -698,12 +733,13 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
 
         for (CodegenOperation op : opList) {
             // Sub-path (part after commonPath)
-            String fullPath = op.path;
-            String subPath = fullPath.startsWith(commonPath)
-                    ? fullPath.substring(commonPath.length())
-                    : fullPath;
+            String fullPath = ServerBasePathSupport.endpointPath(op);
+            String subPath = fullPath.equals(commonPath) ? "" : fullPath;
+            if (!"/".equals(commonPath) && fullPath.startsWith(commonPath)) {
+                subPath = fullPath.substring(commonPath.length());
+            }
             if (!subPath.isEmpty()) {
-                op.vendorExtensions.put("x-method-path", subPath);
+                op.vendorExtensions.put("x-method-path", StringEscapeUtils.escapeJava(subPath));
                 op.vendorExtensions.put("x-has-method-path", Boolean.TRUE);
             }
 
@@ -859,41 +895,6 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
         }
     }
 
-    /**
-     * Find the longest common path prefix shared by all operations in a tag group.
-     * Stops before any path-parameter segment ({...}).
-     */
-    private String computeCommonPath(List<CodegenOperation> ops) {
-        if (ops.isEmpty()) return "/";
-
-        String first = ops.get(0).path;
-        String[] firstParts = first.split("/", -1);
-
-        // Find how many leading segments all operations share
-        int commonSegments = firstParts.length;
-        for (CodegenOperation op : ops) {
-            String[] parts = op.path.split("/", -1);
-            int match = 0;
-            for (int i = 0; i < Math.min(commonSegments, parts.length); i++) {
-                if (firstParts[i].equals(parts[i])) {
-                    match = i + 1;
-                } else {
-                    break;
-                }
-            }
-            commonSegments = Math.min(commonSegments, match);
-        }
-
-        // Build the common path, stopping before any path-parameter segments
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < commonSegments; i++) {
-            if (firstParts[i].isEmpty()) continue;      // skip the leading ""
-            if (firstParts[i].startsWith("{")) break;   // stop at path params
-            sb.append("/").append(firstParts[i]);
-        }
-        return sb.length() == 0 ? "/" : sb.toString();
-    }
-
     // Per-model post-processing: mark required properties and validation constraints
     @Override
     public Map<String, ModelsMap> postProcessAllModels(Map<String, ModelsMap> objs) {
@@ -923,12 +924,17 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
                 modelsByClassname.keySet(),
                 (model, property) -> AllOfValidationSupport.validationSources(
                                 allOfValidationPropertiesBySchema, model, property).stream()
-                        .anyMatch(source -> !buildValidationAnnotations(source).isEmpty()));
+                        .anyMatch(source -> !buildValidationAnnotations(source).isEmpty()),
+                (model, property) -> AllOfValidationSupport.validationSources(
+                                allOfValidationPropertiesBySchema, model, property).stream()
+                        .anyMatch(source -> source.required));
         boolean anyValidation = false;
         for (Map.Entry<String, ModelsMap> entry : result.entrySet()) {
             ModelsMap modelsMap = entry.getValue();
             for (ModelMap modelContainer : modelsMap.getModels()) {
                 var model = modelContainer.getModel();
+                modelContainer.put("runtimePolymorphicValidation",
+                                   cascadingValidation.runtimePolymorphicTypes().contains(model.classname));
                 if (topLevelStringEnums.contains(model.classname)) {
                     continue;
                 }
@@ -937,24 +943,31 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
                 }
 
                 boolean modelHasValidation = cascadingValidation.participatingModels().contains(model.classname);
+                if (cascadingValidation.runtimePolymorphicTypes().contains(model.classname)) {
+                    CascadingValidationSupport.configureRuntimeValidationNames(model);
+                }
                 List<CodegenProperty> renderVars = cascadingValidation.propertiesByModel().get(model.classname);
 
                 for (CodegenProperty prop : renderVars) {
-                    // Mark required properties for @Json.Required
-                    if (prop.required) {
-                        prop.vendorExtensions.put("x-json-required", Boolean.TRUE);
-                    }
-
+                    prop.vendorExtensions.put("x-json-name-literal", JavaStringLiterals.toJavaStringLiteral(prop.baseName));
                     // Build @Validation.* annotations from OpenAPI constraints
                     List<CodegenProperty> validationSources = new ArrayList<>(allOfValidationPropertiesBySchema
                                                                                       .getOrDefault(model.classname,
                                                                                                     Map.of())
                                                                                       .getOrDefault(prop.baseName,
                                                                                                     List.of()));
-                    validationSources.addAll(CascadingValidationSupport.validationSources(model,
-                                                                                           prop,
-                                                                                           cascadingValidation));
+                    List<CodegenProperty> inheritedSources = CascadingValidationSupport.validationSources(model,
+                                                                                                          prop,
+                                                                                                          cascadingValidation);
+                    validationSources.addAll(inheritedSources);
                     CodegenProperty validationProperty = AllOfValidationSupport.merge(model, validationSources);
+                    CascadingValidationSupport.validateRequiredOverride(model, validationProperty,
+                            inheritedSources.subList(0, inheritedSources.size() - 1), cascadingValidation);
+                    prop.required = validationProperty.required;
+                    prop.isNullable = validationProperty.isNullable;
+                    if (prop.required) {
+                        prop.vendorExtensions.put("x-json-required", Boolean.TRUE);
+                    }
                     List<Map<String, Object>> validationAnnotations = buildValidationAnnotations(validationProperty);
                     if (!validationAnnotations.isEmpty()) {
                         prop.vendorExtensions.put("x-validation-annotations", validationAnnotations);
@@ -972,15 +985,20 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
                 }
 
                 CascadingValidationSupport.applyInherited(model, cascadingValidation, modelPackage, inheritedProperty -> {
-                    List<CodegenProperty> validationSources = new ArrayList<>(allOfValidationPropertiesBySchema
-                                                                                      .getOrDefault(model.classname,
-                                                                                                    Map.of())
-                                                                                      .getOrDefault(
-                                                                                              inheritedProperty.baseName,
-                                                                                              List.of()));
-                    validationSources.add(inheritedProperty);
-                    return buildValidationAnnotations(AllOfValidationSupport.merge(model, validationSources));
+                    CodegenProperty validationProperty = AllOfValidationSupport.merge(model,
+                            AllOfValidationSupport.validationSources(allOfValidationPropertiesBySchema,
+                                                                     model, inheritedProperty));
+                    CascadingValidationSupport.validateRequiredOverride(model, validationProperty,
+                                                                         List.of(inheritedProperty), cascadingValidation);
+                    return buildValidationAnnotations(validationProperty);
                 });
+
+                if (cascadingValidation.runtimePolymorphicTypes().contains(model.classname)) {
+                    List<CodegenProperty> validationProperties = new ArrayList<>(renderVars);
+                    validationProperties.addAll(cascadingValidation.inheritedPropertiesByModel()
+                                                        .getOrDefault(model.classname, List.of()));
+                    model.vendorExtensions.put("x-runtime-validation-properties", validationProperties);
+                }
 
                 if (modelHasValidation) {
                     model.vendorExtensions.put("x-has-validations", Boolean.TRUE);
@@ -1731,6 +1749,9 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
      */
     private List<Map<String, Object>> buildValidationAnnotations(CodegenProperty prop) {
         List<Map<String, Object>> result = new ArrayList<>();
+        if (prop.required && !prop.isNullable) {
+            result.add(Map.of("annotation", "@Validation.NotNull"));
+        }
 
         if (prop.isString && !prop.vendorExtensions.containsKey("x-enum-wire-constraints-validated")) {
             // minLength / maxLength → @Validation.String.Length
@@ -1743,8 +1764,8 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
             }
             // pattern → @Validation.String.Pattern
             if (prop.pattern != null && !prop.pattern.isEmpty()) {
-                String escaped = prop.pattern.replace("\\", "\\\\").replace("\"", "\\\"");
-                result.add(Map.of("annotation", "@Validation.String.Pattern(\"" + escaped + "\")"));
+                String literal = JavaStringLiterals.toJavaStringLiteral(prop.pattern);
+                result.add(Map.of("annotation", "@Validation.String.Pattern(" + literal + ")"));
             }
         } else if (prop.isInteger) {
             addIntegerBounds(result, prop.minimum, prop.exclusiveMinimum, prop.maximum, prop.exclusiveMaximum);
@@ -1807,8 +1828,8 @@ public class HelidonDeclarativeCodegen extends AbstractJavaCodegen {
                         "@Validation.String.Length(" + String.join(", ", attrs) + ")"));
             }
             if (param.pattern != null && !param.pattern.isEmpty()) {
-                String escaped = param.pattern.replace("\\", "\\\\").replace("\"", "\\\"");
-                result.add(Map.of("annotation", "@Validation.String.Pattern(\"" + escaped + "\")"));
+                String literal = JavaStringLiterals.toJavaStringLiteral(param.pattern);
+                result.add(Map.of("annotation", "@Validation.String.Pattern(" + literal + ")"));
             }
         } else if (param.isInteger) {
             addIntegerBounds(result, param.minimum, param.exclusiveMinimum, param.maximum, param.exclusiveMaximum);
