@@ -174,29 +174,50 @@ class AqResourceManagerTest {
         Connection late = connection();
         Connection recovered = connection();
         CountDownLatch creating = new CountDownLatch(1);
+        CountDownLatch cancelled = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         when(factory.createConnection()).thenReturn(first).thenAnswer(_ -> {
             creating.countDown();
-            awaitIgnoringInterruption(release);
-            return late;
+            boolean interrupted = false;
+            try {
+                while (true) {
+                    try {
+                        release.await();
+                        return late;
+                    } catch (InterruptedException _) {
+                        interrupted = true;
+                        cancelled.countDown();
+                    }
+                }
+            } finally {
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
         }).thenReturn(recovered);
-        AqResourceManager manager = manager(factory, AqReconnectConfig.builder(policy())
-                .connectTimeout(Duration.ofMillis(50)).build());
+        AqResourceManager manager = manager(factory, policy());
         try {
             manager.open();
-            manager.reconnect(manager.awaitReady(), disconnected());
-            assertThat(creating.await(1, TimeUnit.SECONDS), is(true));
+            assertThat(manager.reconnect(manager.awaitReady(), disconnected()), is(true));
+            assertThat(creating.await(2, TimeUnit.SECONDS), is(true));
+            // The provider must observe cancellation before its late result is allowed to return.
+            assertThat(cancelled.await(3, TimeUnit.SECONDS), is(true));
             assertThrows(MessagingException.class, () -> manager.awaitReady(Duration.ofMillis(200)));
             verify(factory, times(2)).createConnection();
+            verify(late, never()).createSession(true, Session.SESSION_TRANSACTED);
+            verify(recovered, never()).createSession(true, Session.SESSION_TRANSACTED);
             release.countDown();
             manager.awaitReady(Duration.ofSeconds(2));
             verify(late).close();
             verify(late, never()).createSession(true, Session.SESSION_TRANSACTED);
+            verify(recovered).createSession(true, Session.SESSION_TRANSACTED);
             verify(factory, times(3)).createConnection();
         } finally {
             release.countDown();
             manager.close();
         }
+        verify(first).close();
+        verify(recovered).close();
     }
 
     @Test

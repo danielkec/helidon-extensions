@@ -26,6 +26,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 
 import javax.jms.Connection;
 import javax.jms.ConnectionFactory;
@@ -444,15 +445,15 @@ class AqOutgoingReconnectTest {
         ConnectionFactory factory = factory(original, replacement);
         doThrow(connectionFailure()).when(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
         AqOutgoingChannel channel = channel(config(factory, false)
-                                                    .reconnect(reconnect().initialDelay(Duration.ofSeconds(5))
-                                                                       .maxDelay(Duration.ofSeconds(5))
+                                                    .reconnect(reconnect().initialDelay(Duration.ofMinutes(1))
+                                                                       .maxDelay(Duration.ofMinutes(1))
                                                                        .waitTimeout(Duration.ofSeconds(30)).build())
                                                     .buildPrototype());
         channel.start();
-        assertThrows(BatchDeliveryException.class, () -> channel.sendBatch(batch("first")));
         List<FutureTask<BatchDeliveryException>> sends = new ArrayList<>();
         List<Thread> senders = new ArrayList<>();
         try {
+            assertThrows(BatchDeliveryException.class, () -> channel.sendBatch(batch("first")));
             for (int i = 0; i < 4; i++) {
                 MessageBatch<String> pending = batch("pending-" + i);
                 FutureTask<BatchDeliveryException> send = new FutureTask<>(() -> {
@@ -464,12 +465,21 @@ class AqOutgoingReconnectTest {
                 sends.add(send);
                 senders.add(Thread.ofVirtual().start(send));
             }
-            for (FutureTask<BatchDeliveryException> send : sends) {
-                assertThrows(TimeoutException.class, () -> send.get(100, TimeUnit.MILLISECONDS));
+            // Backoff exceeds the test timeout, so no connection can become ready. With real batches and no
+            // blocking fixture callbacks, these senders can reach TIMED_WAITING only in the recovery wait.
+            long waitingDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            for (Thread sender : senders) {
+                Thread.State state;
+                while ((state = sender.getState()) != Thread.State.TIMED_WAITING
+                        && state != Thread.State.TERMINATED && System.nanoTime() < waitingDeadline) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertThat("Each sender must enter the recovery wait before close", state, is(Thread.State.TIMED_WAITING));
             }
             channel.close();
             for (FutureTask<BatchDeliveryException> send : sends) {
                 BatchDeliveryException failure = send.get(1, TimeUnit.SECONDS);
+                assertThat(failure.getCause().getMessage(), is("AQ channel recovery has stopped"));
                 assertThat(failure.outcome(0).status(), is(BatchItemStatus.NOT_ATTEMPTED));
             }
             verify(factory, times(1)).createConnection();
