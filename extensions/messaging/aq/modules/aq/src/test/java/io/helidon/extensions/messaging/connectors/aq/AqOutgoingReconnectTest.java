@@ -535,8 +535,7 @@ class AqOutgoingReconnectTest {
                 nativeAdt(invocation.getArgument(0)));
         doThrow(connectionFailure()).when(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
         AqOutgoingChannel channel = channel(config(factory, true).payloadType(AqPayloadType.ADT).buildPrototype());
-        AqAdt value = AqAdt.builder().typeName("APP.LOB_VALUE")
-                .addAttribute(AqBlob.builder().bytes(new byte[]{1}).build()).build();
+        AqAdt value = AqAdt.create("APP.LOB_VALUE", List.of(AqBlob.create(new byte[]{1})));
         channel.start();
         try {
             assertThrows(BatchDeliveryException.class, () -> channel.sendBatch(MessageBatch.create(Message.create(value))));

@@ -194,7 +194,7 @@ final class AqMessageMapper {
             Object payload = adt.getAdtPayload();
             if (payload instanceof XMLType xml) {
                 try {
-                    return AqXml.builder().text(xml.getStringVal()).build();
+                    return AqXml.create(xml.getStringVal());
                 } finally {
                     xml.close();
                 }
@@ -398,44 +398,42 @@ final class AqMessageMapper {
             return AqAdt.NullValue.INSTANCE;
         }
         if (value instanceof Struct struct) {
-            AqAdtConfig.Builder builder = AqAdt.builder().typeName(struct.getSQLTypeName());
-            detachAttributes(builder, struct.getAttributes(), maxBodyBytes);
-            return builder.build();
+            return AqAdt.create(struct.getSQLTypeName(), detachAttributes(struct.getAttributes(), maxBodyBytes));
         }
         if (value instanceof OracleArray array) {
             try (SqlResource _ = array::free) {
-                AqAdtConfig.Builder builder = AqAdt.builder().typeName(array.getSQLTypeName()).kind(AqAdt.Kind.ARRAY);
-                detachAttributes(builder, array.getArray(), maxBodyBytes);
-                return builder.build();
+                return AqAdt.createArray(array.getSQLTypeName(), detachAttributes(array.getArray(), maxBodyBytes));
             }
         }
         if (value instanceof Blob blob) {
             try (SqlResource _ = blob::free) {
                 long length = blob.length();
                 requireLength(length, maxBodyBytes);
-                return AqBlob.builder().bytes(blob.getBytes(1, (int) length)).build();
+                return AqBlob.create(blob.getBytes(1, (int) length));
             }
         }
         if (value instanceof Clob clob) {
             try (SqlResource _ = clob::free) {
                 long length = clob.length();
                 requireLength(length, maxBodyBytes);
-                return AqClob.builder().text(clob.getSubString(1, (int) length)).national(clob instanceof NClob).build();
+                String text = clob.getSubString(1, (int) length);
+                return clob instanceof NClob ? AqClob.createNational(text) : AqClob.create(text);
             }
         }
         if (value instanceof SQLXML xml) {
             try (SqlResource _ = xml::free) {
-                return AqXml.builder().text(xml.getString()).build();
+                return AqXml.create(xml.getString());
             }
         }
         return AqValues.sqlValue(value);
     }
 
-    private static void detachAttributes(AqAdtConfig.Builder builder, Object values, int maxBodyBytes) throws SQLException {
+    private static List<Object> detachAttributes(Object values, int maxBodyBytes) throws SQLException {
+        List<Object> attributes = new ArrayList<>();
         Exception failure = null;
         for (int i = 0; i < java.lang.reflect.Array.getLength(values); i++) {
             try {
-                builder.addAttribute(detach(java.lang.reflect.Array.get(values, i), maxBodyBytes));
+                attributes.add(detach(java.lang.reflect.Array.get(values, i), maxBodyBytes));
             } catch (SQLException | RuntimeException e) {
                 // Finish detaching siblings so their JDBC resources are released as well.
                 if (failure == null) {
@@ -451,6 +449,7 @@ final class AqMessageMapper {
         if (failure instanceof RuntimeException runtime) {
             throw runtime;
         }
+        return attributes;
     }
 
     private static Object attach(Object value, Connection connection, List<AutoCloseable> resources) throws SQLException {

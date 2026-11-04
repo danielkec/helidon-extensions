@@ -133,7 +133,7 @@ class AqOracleMetadataTest {
         AQjmsSession session = mock(AQjmsSession.class);
         AQjmsAdtMessage outgoing = mock(AQjmsAdtMessage.class);
         when(session.createORAMessage(any(OracleData.class))).thenReturn(outgoing);
-        AqAdt payload = AqAdt.builder().typeName("APP.EVENT_TYPE").addAttribute("event").build();
+        AqAdt payload = AqAdt.create("APP.EVENT_TYPE", List.of("event"));
 
         AqMessageMapper.toNative(session, AqMessage.builder(payload).exceptionQueue("APP.ERRORS").build(),
                                  config(AqPayloadType.ADT));

@@ -44,6 +44,7 @@ import org.mockito.ArgumentCaptor;
 
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -59,15 +60,40 @@ class AqLobTest {
     @Test
     void binaryLobIsAnImmutableSnapshot() {
         byte[] bytes = {1, 2};
-        AqBlob blob = AqBlob.builder().bytes(bytes).build();
-        AqAdt object = AqAdt.builder().typeName("APP.LOB_VALUE").addAttribute(blob).build();
+        AqBlob blob = AqBlob.create(bytes);
+        AqAdt object = AqAdt.create("APP.LOB_VALUE", List.of(blob));
         bytes[0] = 9;
         blob.bytes()[1] = 8;
 
         assertThat(((AqBlob) object.attributes().getFirst()).bytes(), is(new byte[]{1, 2}));
-        assertThat(AqClob.builder().text("value").build().national(), is(false));
-        assertThrows(NullPointerException.class, () -> AqBlob.builder().bytes(null));
-        assertThrows(NullPointerException.class, () -> AqClob.builder().text(null));
+        assertThat(AqClob.create("value").national(), is(false));
+        assertThrows(NullPointerException.class, () -> AqBlob.create(null));
+        assertThrows(NullPointerException.class, () -> AqClob.create(null));
+    }
+
+    @Test
+    void textValueFactoriesPreserveNationalFlagAndValueEquality() {
+        AqClob clob = AqClob.create("value");
+        AqClob national = AqClob.createNational("value");
+        AqXml xml = AqXml.create("<value/>");
+
+        assertThat(clob.national(), is(false));
+        assertThat(national.national(), is(true));
+        assertThat(national.text(), is("value"));
+        assertThat(clob, is(AqClob.create("value")));
+        assertThat(clob.hashCode(), is(AqClob.create("value").hashCode()));
+        assertThat(national, is(AqClob.createNational("value")));
+        assertThat(national.hashCode(), is(AqClob.createNational("value").hashCode()));
+        assertThat(clob, not(national));
+        assertThat(clob, not(AqClob.create("other")));
+        assertThat(xml, is(AqXml.create("<value/>")));
+        assertThat(xml.hashCode(), is(AqXml.create("<value/>").hashCode()));
+        assertThat(xml, not(AqXml.create("<other/>")));
+        assertThat(AqClob.create("").text(), is(""));
+        assertThat(AqClob.createNational("").text(), is(""));
+        assertThat(AqXml.create("").text(), is(""));
+        assertThrows(NullPointerException.class, () -> AqClob.createNational(null));
+        assertThrows(NullPointerException.class, () -> AqXml.create(null));
     }
 
     @Test
@@ -120,9 +146,8 @@ class AqLobTest {
         OracleArray array = mock(OracleArray.class);
         when(connection.createOracleArray(eq("APP.LOB_VALUES"), any(Object[].class))).thenReturn(array);
 
-        AQjmsAdtMessage message = mapped(AqAdt.builder().typeName("APP.ENVELOPE")
-                                              .addAttribute(AqAdt.builder().typeName("APP.LOB_VALUES").kind(AqAdt.Kind.ARRAY)
-                                                                    .addAttribute(lobs()).build()).build());
+        AqAdt arrayValue = AqAdt.createArray("APP.LOB_VALUES", List.of(lobs()));
+        AQjmsAdtMessage message = mapped(AqAdt.create("APP.ENVELOPE", List.of(arrayValue)));
         ((OracleData) message.getAdtPayload()).toJDBCObject(connection);
 
         verify(blob).setBytes(1, new byte[]{1, 2});
@@ -314,8 +339,7 @@ class AqLobTest {
             data.toJDBCObject(connection);
             throw new JMSException("message creation failed");
         });
-        AqAdt body = AqAdt.builder().typeName("APP.BLOB_VALUE")
-                .addAttribute(AqBlob.builder().bytes(new byte[]{1}).build()).build();
+        AqAdt body = AqAdt.create("APP.BLOB_VALUE", List.of(AqBlob.create(new byte[]{1})));
 
         MessagingException failure = assertThrows(MessagingException.class,
                                                   () -> AqMessageMapper.toNative(session, Message.create(body), config(4)));
@@ -337,8 +361,7 @@ class AqLobTest {
             when(nativeMessage.getAdtPayload()).thenReturn(data);
             return nativeMessage;
         });
-        AqMessage<AqAdt> message = AqMessage.builder(AqAdt.builder().typeName("APP.BLOB_VALUE")
-                                                           .addAttribute(AqBlob.builder().bytes(new byte[]{1}).build()).build())
+        AqMessage<AqAdt> message = AqMessage.builder(AqAdt.create("APP.BLOB_VALUE", List.of(AqBlob.create(new byte[]{1}))))
                 .type("unsupported").build();
 
         assertThrows(MessagingException.class, () -> AqMessageMapper.toNative(session, message, config(4)));
@@ -347,11 +370,9 @@ class AqLobTest {
     }
 
     private static AqAdt lobs() {
-        return AqAdt.builder().typeName("APP.LOB_VALUE")
-                .addAttribute(AqBlob.builder().bytes(new byte[]{1, 2}).build())
-                .addAttribute(AqClob.builder().text("text").build())
-                .addAttribute(AqClob.builder().text("ž漢").national(true).build())
-                .build();
+        return AqAdt.create("APP.LOB_VALUE", List.of(AqBlob.create(new byte[]{1, 2}),
+                                                   AqClob.create("text"),
+                                                   AqClob.createNational("ž漢")));
     }
 
     private static Struct struct(String typeName, Object... attributes) throws SQLException {

@@ -422,8 +422,8 @@ class AqConnectorIT {
     void adtMessagesSupportDeliveryDelay() throws Exception {
         Receiver receiver = new Receiver();
         ServiceRegistryManager manager = runtime("DELAY_ADT_QUEUE", "payload-type: ADT", "", receiver);
-        AqAdt payload = AqAdt.builder().typeName(database.schema() + ".AQ_TEST_EVENT")
-                .addAttribute("delayed ADT").addAttribute(new BigDecimal("42")).build();
+        AqAdt payload = AqAdt.create(database.schema() + ".AQ_TEST_EVENT",
+                                     List.of("delayed ADT", new BigDecimal("42")));
         String exceptionQueue = database.schema() + ".ADT_EXCEPTION_QUEUE";
         messaging(manager).emit("outgoing", AqMessage.builder(payload).deliveryDelay(Duration.ofSeconds(3))
                 .exceptionQueue(exceptionQueue).build());
@@ -443,7 +443,7 @@ class AqConnectorIT {
     void xmlMessagesSupportDeliveryDelay() throws Exception {
         Receiver receiver = new Receiver();
         ServiceRegistryManager manager = runtime("DELAY_XML_QUEUE", "payload-type: XML", "", receiver);
-        AqXml payload = AqXml.builder().text("<event>delayed XML</event>").build();
+        AqXml payload = AqXml.create("<event>delayed XML</event>");
         String exceptionQueue = database.schema() + ".XML_EXCEPTION_QUEUE";
         messaging(manager).emit("outgoing", AqMessage.builder(payload).deliveryDelay(Duration.ofSeconds(3))
                 .exceptionQueue(exceptionQueue).build());
@@ -752,8 +752,8 @@ class AqConnectorIT {
     @Test
     void incompatibleTransformationInputRollsBackEarlierEnqueueInTheBatch() throws Exception {
         ServiceRegistryManager manager = runtime("TRANSFORM_TARGET_QUEUE", transformationOptions("AQ_EVENT_TO_TARGET"), "", null);
-        AqAdt incompatible = AqAdt.builder().typeName(database.schema() + ".AQ_TEST_TARGET")
-                .addAttribute("wrong source type").addAttribute(BigDecimal.ONE).build();
+        AqAdt incompatible = AqAdt.create(database.schema() + ".AQ_TEST_TARGET",
+                                          List.of("wrong source type", BigDecimal.ONE));
         MessageBatch<AqAdt> batch = MessageBatch.create(List.of(AqMessage.create(transformationEvent("must roll back", 1)),
                                                                AqMessage.create(incompatible)));
 
@@ -885,10 +885,7 @@ class AqConnectorIT {
     void adtRoundTripRetainsSqlTypeAndOrderedAttributes() throws Exception {
         Receiver receiver = new Receiver();
         ServiceRegistryManager manager = runtime("ADT_QUEUE", "payload-type: ADT", "", receiver);
-        AqAdt event = AqAdt.builder().typeName(database.schema() + ".AQ_TEST_EVENT")
-                .addAttribute("created")
-                .addAttribute(BigDecimal.valueOf(42))
-                .build();
+        AqAdt event = AqAdt.create(database.schema() + ".AQ_TEST_EVENT", List.of("created", BigDecimal.valueOf(42)));
         messaging(manager).emit("outgoing", AqMessage.builder(event).correlationId("adt-correlation").build());
 
         AqMessage<?> received = receiver.await();
@@ -916,10 +913,8 @@ class AqConnectorIT {
         Receiver receiver = new Receiver();
         ServiceRegistryManager manager = runtime("NESTED_LOB_QUEUE", "payload-type: ADT", "", receiver);
         AqAdt child = lobValue();
-        AqAdt array = AqAdt.builder().typeName(database.schema() + ".AQ_TEST_LOB_ARRAY")
-                .kind(AqAdt.Kind.ARRAY).addAttribute(child).build();
-        AqAdt parent = AqAdt.builder().typeName(database.schema() + ".AQ_TEST_NESTED_LOBS")
-                .addAttribute(child).addAttribute(array).build();
+        AqAdt array = AqAdt.createArray(database.schema() + ".AQ_TEST_LOB_ARRAY", List.of(child));
+        AqAdt parent = AqAdt.create(database.schema() + ".AQ_TEST_NESTED_LOBS", List.of(child, array));
         messaging(manager).emit("outgoing", AqMessage.create(parent));
         AqMessage<?> first = receiver.await();
         assertNestedLobValue((AqAdt) first.entity());
@@ -999,7 +994,7 @@ class AqConnectorIT {
         Receiver receiver = new Receiver();
         ServiceRegistryManager manager = runtime("XML_QUEUE", "payload-type: XML", "", receiver);
         String xml = "<event><value>42</value></event>";
-        messaging(manager).emit("outgoing", AqMessage.create(AqXml.builder().text(xml).build()));
+        messaging(manager).emit("outgoing", AqMessage.create(AqXml.create(xml)));
 
         AqMessage<?> received = receiver.await();
         assertThat(received.entity(), instanceOf(AqXml.class));
@@ -1125,11 +1120,10 @@ class AqConnectorIT {
     }
 
     private AqAdt lobValue() {
-        return AqAdt.builder().typeName(database.schema() + ".AQ_TEST_LOBS")
-                .addAttribute(AqBlob.builder().bytes(new byte[] {0, 1, 2, (byte) 255}).build())
-                .addAttribute(AqClob.builder().text("LOB content").build())
-                .addAttribute(AqClob.builder().text("národní 漢字").national(true).build())
-                .build();
+        return AqAdt.create(database.schema() + ".AQ_TEST_LOBS",
+                            List.of(AqBlob.create(new byte[] {0, 1, 2, (byte) 255}),
+                                    AqClob.create("LOB content"),
+                                    AqClob.createNational("národní 漢字")));
     }
 
     private AqConnector reconnectConnector(String destination) {
@@ -1155,8 +1149,7 @@ class AqConnectorIT {
     }
 
     private AqAdt transformationEvent(String label, int amount) {
-        return AqAdt.builder().typeName(database.schema() + ".AQ_TEST_EVENT")
-                .addAttribute(label).addAttribute(BigDecimal.valueOf(amount)).build();
+        return AqAdt.create(database.schema() + ".AQ_TEST_EVENT", List.of(label, BigDecimal.valueOf(amount)));
     }
 
     private Destination detachedDestination(String destination, AqDestinationType type) throws Exception {
@@ -1169,9 +1162,8 @@ class AqConnectorIT {
     }
 
     private AqAdt binaryLobValue(byte[] bytes) {
-        return AqAdt.builder().typeName(database.schema() + ".AQ_TEST_LOBS")
-                .addAttribute(AqBlob.builder().bytes(bytes).build())
-                .addAttribute(AqAdt.NullValue.INSTANCE).addAttribute(AqAdt.NullValue.INSTANCE).build();
+        return AqAdt.create(database.schema() + ".AQ_TEST_LOBS",
+                            List.of(AqBlob.create(bytes), AqAdt.NullValue.INSTANCE, AqAdt.NullValue.INSTANCE));
     }
 
     private boolean adtAvailable(String queue) throws Exception {

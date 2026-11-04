@@ -19,8 +19,11 @@ package io.helidon.extensions.messaging.connectors.aq;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import io.helidon.messaging.MessageHeaderValue;
@@ -82,12 +85,7 @@ class AqMessageTest {
     void snapshotsSqlAttributesAndNulls() {
         byte[] bytes = {1, 2};
         Timestamp timestamp = Timestamp.valueOf("2026-10-15 10:15:30.123456789");
-        AqAdt adt = AqAdt.builder()
-                .typeName("APP.ORDER_TYPE")
-                .addAttribute(bytes)
-                .addAttribute(timestamp)
-                .addAttribute(AqAdt.NullValue.INSTANCE)
-                .build();
+        AqAdt adt = AqAdt.create("APP.ORDER_TYPE", List.of(bytes, timestamp, AqAdt.NullValue.INSTANCE));
         bytes[0] = 8;
         timestamp.setNanos(0);
         ((byte[]) adt.attributes().getFirst())[1] = 9;
@@ -97,7 +95,36 @@ class AqMessageTest {
         assertThat(((Timestamp) adt.attributes().get(1)).getNanos(), is(123456789));
         assertThat(adt.attributes().get(2), is(AqAdt.NullValue.INSTANCE));
         assertThrows(IllegalArgumentException.class,
-                     () -> AqAdt.builder().typeName("APP.TYPE").addAttribute(new Object()).build());
+                     () -> AqAdt.create("APP.TYPE", List.of(new Object())));
+    }
+
+    @Test
+    void sqlValueFactoriesPreserveShapesAndSnapshotLists() {
+        List<Object> values = new ArrayList<>(List.of("first", AqAdt.NullValue.INSTANCE));
+        AqAdt object = AqAdt.create("APP.OBJECT_TYPE", values);
+        AqAdt array = AqAdt.createArray("APP.ARRAY_TYPE", values);
+        values.clear();
+
+        assertThat(object.kind(), is(AqAdt.Kind.STRUCT));
+        assertThat(array.kind(), is(AqAdt.Kind.ARRAY));
+        assertThat(object.typeName(), is("APP.OBJECT_TYPE"));
+        assertThat(array.typeName(), is("APP.ARRAY_TYPE"));
+        assertThat(object.attributes(), is(List.of("first", AqAdt.NullValue.INSTANCE)));
+        assertThat(array.attributes(), is(object.attributes()));
+        assertThrows(UnsupportedOperationException.class, () -> array.attributes().clear());
+        assertThat(AqAdt.createArray("APP.EMPTY_ARRAY", List.of()).attributes(), is(List.of()));
+    }
+
+    @Test
+    void sqlValueFactoriesRejectInvalidInputs() {
+        assertThrows(NullPointerException.class, () -> AqAdt.create(null, List.of()));
+        assertThrows(NullPointerException.class, () -> AqAdt.createArray(null, List.of()));
+        assertThrows(IllegalArgumentException.class, () -> AqAdt.create(" ", List.of()));
+        assertThrows(IllegalArgumentException.class, () -> AqAdt.createArray("", List.of()));
+        assertThrows(NullPointerException.class, () -> AqAdt.create("APP.OBJECT_TYPE", null));
+        assertThrows(NullPointerException.class, () -> AqAdt.createArray("APP.ARRAY_TYPE", null));
+        assertThrows(NullPointerException.class, () -> AqAdt.create("APP.OBJECT_TYPE", Collections.singletonList(null)));
+        assertThrows(NullPointerException.class, () -> AqAdt.createArray("APP.ARRAY_TYPE", Collections.singletonList(null)));
     }
 
     @Test

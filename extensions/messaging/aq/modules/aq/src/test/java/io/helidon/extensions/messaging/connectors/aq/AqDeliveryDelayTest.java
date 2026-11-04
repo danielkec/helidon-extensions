@@ -263,7 +263,7 @@ class AqDeliveryDelayTest {
         AQjmsSession session = mock(AQjmsSession.class);
         AQjmsAdtMessage nativeMessage = mock(AQjmsAdtMessage.class);
         when(session.createORAMessage(any(OracleData.class))).thenReturn(nativeMessage);
-        AqAdt payload = AqAdt.builder().typeName("APP.EVENT_TYPE").addAttribute("event").build();
+        AqAdt payload = AqAdt.create("APP.EVENT_TYPE", List.of("event"));
         AqMessage<AqAdt> message = AqMessage.builder(payload).deliveryDelay(Duration.ofSeconds(3)).build();
 
         AqMessageMapper.toNative(session, message, config(AqPayloadType.ADT));

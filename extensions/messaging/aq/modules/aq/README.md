@@ -211,24 +211,22 @@ connector or DataSource does not make another outgoing channel's messages local 
 Build SQL objects using their qualified database type name and ordered attributes:
 
 ```java
-AqAdt event = AqAdt.builder()
-        .typeName("ORDERS.ORDER_EVENT")
-        .addAttribute("order-42")
-        .addAttribute(BigDecimal.valueOf(12))
-        .build();
-AqXml xml = AqXml.builder().text("<order id=\"42\"/>").build();
+AqAdt event = AqAdt.create("ORDERS.ORDER_EVENT", List.of("order-42", BigDecimal.valueOf(12)));
+AqXml xml = AqXml.create("<order id=\"42\"/>");
 ```
 
 `AqAdt.NullValue.INSTANCE` represents a SQL NULL attribute. Nested SQL objects and named arrays use nested
-`AqAdt` values. XML is represented as text after the provider value is detached. Native objects requiring
+`AqAdt` values; use `AqAdt.createArray(typeName, elements)` for a named SQL array. The four detached value types
+use static factories and do not require configuration objects or builders. XML is represented as text after
+the provider value is detached. Native objects requiring
 unsupported JDBC attribute types fail conversion; they are not exposed as live JDBC objects.
 
 SQL LOB attributes retain their type in detached `AqBlob` and `AqClob` values, including inside nested objects and arrays:
 
 ```java
-AqBlob binary = AqBlob.builder().bytes(new byte[] {1, 2, 3}).build();
-AqClob text = AqClob.builder().text("CLOB content").build();
-AqClob nationalText = AqClob.builder().text("NCLOB content").national(true).build();
+AqBlob binary = AqBlob.create(new byte[] {1, 2, 3});
+AqClob text = AqClob.create("CLOB content");
+AqClob nationalText = AqClob.createNational("NCLOB content");
 ```
 
 An incoming ADT can be forwarded with these values intact. The connector creates temporary LOBs on the sending

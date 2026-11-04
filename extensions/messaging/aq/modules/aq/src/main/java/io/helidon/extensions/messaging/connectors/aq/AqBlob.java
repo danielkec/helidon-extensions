@@ -29,21 +29,19 @@ import io.helidon.common.Api;
 public final class AqBlob {
     private final byte[] bytes;
 
-    private AqBlob(AqBlobConfig config) {
-        this.bytes = Objects.requireNonNull(config.bytes(), "BLOB bytes").clone();
+    private AqBlob(byte[] bytes) {
+        this.bytes = Objects.requireNonNull(bytes, "BLOB bytes").clone();
     }
 
     /**
-     * Create a builder.
+     * Create a detached SQL BLOB by copying its binary content.
      *
-     * @return builder
+     * @param bytes non-null binary content
+     * @return detached SQL BLOB
+     * @throws NullPointerException if the content is null
      */
-    public static AqBlobConfig.Builder builder() {
-        return AqBlobConfig.builder();
-    }
-
-    static AqBlob create(AqBlobConfig config) {
-        return new AqBlob(Objects.requireNonNull(config));
+    public static AqBlob create(byte[] bytes) {
+        return new AqBlob(bytes);
     }
 
     /**
