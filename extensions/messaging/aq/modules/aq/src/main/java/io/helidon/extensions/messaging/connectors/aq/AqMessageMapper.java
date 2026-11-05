@@ -70,7 +70,7 @@ final class AqMessageMapper {
             }
             byte[] serialized = message instanceof ObjectMessage && config.payloadConverter().isEmpty()
                     ? AqValues.serialize((Serializable) body) : null;
-            return AqMessage.incoming(body, serialized, readProperties(message), message, true);
+            return AqIncomingMessage.incoming(body, serialized, readProperties(message), message, true);
         } catch (JMSException | SQLException e) {
             throw new AqMappingException("Cannot snapshot incoming AQ message", e);
         }
@@ -78,9 +78,9 @@ final class AqMessageMapper {
 
     static AqMessage<?> metadataOnly(javax.jms.Message message) {
         try {
-            return AqMessage.incoming(null, null, readProperties(message), message, false);
+            return AqIncomingMessage.incoming(null, null, readProperties(message), message, false);
         } catch (JMSException | RuntimeException _) {
-            return AqMessage.unavailable();
+            return AqIncomingMessage.unavailable();
         }
     }
 
@@ -88,15 +88,16 @@ final class AqMessageMapper {
         AqMessageMetadata.Outgoing options = AqMessageMetadata.outgoing(message, config.payloadType());
         Message<?> original = message instanceof DeadLetterMessage<?> deadLetter ? deadLetter.originalMessage() : message;
         AqMessage<?> aq = original instanceof AqMessage<?> candidate ? candidate : null;
-        Object entity = aq == null ? original.entity()
-                : aq.bodyAvailable() ? aq.entityForMapping(config.allowObjectMessages()) : null;
+        AqIncomingMessage<?> incoming = original instanceof AqIncomingMessage<?> snapshot ? snapshot : null;
+        Object entity = incoming == null ? original.entity()
+                : incoming.bodyAvailable() ? incoming.entityForMapping(config.allowObjectMessages()) : null;
         if (entity != null && config.payloadConverter().isPresent()) {
             entity = Objects.requireNonNull(config.payloadConverter().orElseThrow().toPayload(entity),
                                             "AQ outgoing payload converter result");
         }
         javax.jms.Message result = null;
         try {
-            result = aq != null && aq.objectBody() && config.payloadConverter().isEmpty()
+            result = incoming != null && incoming.objectBody() && config.payloadConverter().isEmpty()
                     ? createObject(session, entity, config) : createBody(session, entity, config);
             options.applyTo(result);
             if (aq != null) {

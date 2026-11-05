@@ -16,7 +16,6 @@
 
 package io.helidon.extensions.messaging.connectors.aq;
 
-import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -24,24 +23,15 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 
-import javax.jms.Destination;
-import javax.jms.JMSException;
-import javax.jms.Queue;
-import javax.jms.Topic;
-
 import io.helidon.common.Api;
 import io.helidon.messaging.Message;
 import io.helidon.messaging.MessageHeaders;
 import io.helidon.messaging.MessageMetadata;
-import io.helidon.messaging.MessagingException;
-
-import oracle.jms.AQjmsAgent;
-import oracle.jms.AQjmsDestination;
-import oracle.jms.AQjmsMessage;
-import oracle.jms.AdtMessage;
 
 /**
  * AQ message with detached payload and immutable native metadata.
+ * Application-created messages are {@link AqOutgoingMessage} instances.
+ * Received snapshots expose the same envelope contract.
  * Binary payloads, map structure, and byte-array map values are defensively copied.
  * Map keys and other map values are retained; applications and converters must keep these values stable.
  * Use the Map interface for map entity types and
@@ -53,7 +43,7 @@ import oracle.jms.AdtMessage;
  * @param <T> payload type
  */
 @Api.Incubating
-public final class AqMessage<T> implements Message<T> {
+public sealed interface AqMessage<T> extends Message<T> permits AqOutgoingMessage, AqIncomingMessage {
     /**
      * Local metadata entry controlling the delay before an outgoing message becomes available for dequeue.
      * The value must be a {@link io.helidon.messaging.MessageHeaderValue.IntegerValue} between zero and
@@ -61,7 +51,7 @@ public final class AqMessage<T> implements Message<T> {
      * The connector interprets this entry as Oracle's delivery-delay option, not as an application property.
      * It is ignored on {@link io.helidon.messaging.DeadLetterMessage} envelopes and is not populated on received messages.
      */
-    public static final String DELIVERY_DELAY_METADATA = "helidon.messaging.aq.delivery-delay-seconds";
+    String DELIVERY_DELAY_METADATA = "helidon.messaging.aq.delivery-delay-seconds";
 
     /**
      * Outgoing application identifier, represented by non-blank
@@ -69,7 +59,7 @@ public final class AqMessage<T> implements Message<T> {
      * Sets Oracle's JMSXAppID on JMS payloads; ADT and XML payloads do not support it.
      * Ignored on {@link io.helidon.messaging.DeadLetterMessage} envelopes.
      */
-    public static final String APPLICATION_ID_METADATA = "helidon.messaging.aq.application-id";
+    String APPLICATION_ID_METADATA = "helidon.messaging.aq.application-id";
 
     /**
      * Outgoing Oracle exception queue name, represented by non-blank
@@ -77,133 +67,47 @@ public final class AqMessage<T> implements Message<T> {
      * Sets JMS_OracleExcpQ for JMS, ADT and XML payloads. The named queue must be an existing Oracle exception queue;
      * use a schema-qualified name to select its owner. Ignored on {@link io.helidon.messaging.DeadLetterMessage} envelopes.
      */
-    public static final String EXCEPTION_QUEUE_METADATA = "helidon.messaging.aq.exception-queue";
+    String EXCEPTION_QUEUE_METADATA = "helidon.messaging.aq.exception-queue";
 
     /**
      * Received JMSXAppID as text, when available on a JMS payload. Observation only; not applied to outgoing messages.
      */
-    public static final String RECEIVED_APPLICATION_ID_METADATA = "helidon.messaging.aq.received.application-id";
+    String RECEIVED_APPLICATION_ID_METADATA = "helidon.messaging.aq.received.application-id";
 
     /**
      * Received JMSXUserID as text, when available on a JMS payload. Observation only; not applied to outgoing messages.
      */
-    public static final String RECEIVED_USER_ID_METADATA = "helidon.messaging.aq.received.user-id";
+    String RECEIVED_USER_ID_METADATA = "helidon.messaging.aq.received.user-id";
 
     /**
      * Received Oracle exception queue name as text, when available. Observation only; not applied to outgoing messages.
      */
-    public static final String RECEIVED_EXCEPTION_QUEUE_METADATA = "helidon.messaging.aq.received.exception-queue";
+    String RECEIVED_EXCEPTION_QUEUE_METADATA = "helidon.messaging.aq.received.exception-queue";
 
     /**
      * Received JMSXState as integer metadata: 0 READY, 1 WAITING, 2 PROCESSED, or 3 EXPIRED.
      * Observation only; not applied to outgoing messages.
      */
-    public static final String RECEIVED_STATE_METADATA = "helidon.messaging.aq.received.state";
+    String RECEIVED_STATE_METADATA = "helidon.messaging.aq.received.state";
 
     /**
      * Receive time recorded by the Oracle Java client, as integer milliseconds since the epoch.
      * Snapshots JMSXRcvTimestamp. Observation only; not applied to outgoing messages.
      */
-    public static final String RECEIVED_TIMESTAMP_METADATA = "helidon.messaging.aq.received.timestamp-millis";
+    String RECEIVED_TIMESTAMP_METADATA = "helidon.messaging.aq.received.timestamp-millis";
 
     /**
      * Original message identifier from Oracle propagation, as text when the provider supplies it.
      * Snapshots JMS_OracleOriginalMessageID; absence is not replaced with the current message ID.
      * Observation only; not applied to outgoing messages.
      */
-    public static final String RECEIVED_ORIGINAL_MESSAGE_ID_METADATA = "helidon.messaging.aq.received.original-message-id";
+    String RECEIVED_ORIGINAL_MESSAGE_ID_METADATA = "helidon.messaging.aq.received.original-message-id";
 
     /**
      * Original Oracle delivery delay as integer seconds, when available. This is not the remaining wait time.
      * Observation only; not applied to outgoing messages.
      */
-    public static final String RECEIVED_DELIVERY_DELAY_METADATA = "helidon.messaging.aq.received.delivery-delay-seconds";
-
-    private final Object entity;
-    private final byte[] serializedEntity;
-    private final boolean bodyAvailable;
-    private final Map<String, Object> properties;
-    private final MessageHeaders headers;
-    private final MessageMetadata localMetadata;
-    private final List<AqRecipient> recipients;
-    private final Optional<String> messageId;
-    private final Optional<String> correlationId;
-    private final Optional<String> type;
-    private final Optional<String> replyTo;
-    private final Optional<AqRecipient> replyToAgent;
-    private final AqDestinationType replyToType;
-    private final OptionalLong timestamp;
-    private final OptionalLong expiration;
-    private final OptionalInt priority;
-    private final OptionalInt deliveryMode;
-    private final Optional<Boolean> redelivered;
-    private final OptionalInt attempts;
-    private final Optional<AqRecipient> sender;
-
-    private AqMessage(AqMessageConfig<T> config, boolean bodyAvailable) {
-        Objects.requireNonNull(config);
-        this.entity = AqValues.body(config.entity());
-        this.serializedEntity = null;
-        this.bodyAvailable = bodyAvailable;
-        this.properties = AqValues.properties(config.properties());
-        this.headers = AqValues.headers(properties);
-        MessageMetadata.Builder metadata = MessageMetadata.builder();
-        config.localMetadata().forEach(metadata::set);
-        this.localMetadata = metadata.build();
-        this.recipients = List.copyOf(config.recipients());
-        this.messageId = Optional.empty();
-        this.correlationId = config.correlationId();
-        this.type = config.type();
-        this.replyTo = config.replyTo();
-        this.replyToAgent = config.replyToAgent();
-        if (replyTo.isPresent() && replyToAgent.isPresent()) {
-            throw new IllegalArgumentException("AQ reply-to destination and reply-to agent are mutually exclusive");
-        }
-        this.replyToType = config.replyToType();
-        this.timestamp = OptionalLong.empty();
-        this.expiration = OptionalLong.empty();
-        this.priority = OptionalInt.empty();
-        this.deliveryMode = OptionalInt.empty();
-        this.redelivered = Optional.empty();
-        this.attempts = OptionalInt.empty();
-        this.sender = Optional.empty();
-    }
-
-    private AqMessage(Object entity, byte[] serializedEntity, Map<String, Object> properties,
-                      javax.jms.Message message, boolean bodyAvailable) throws JMSException {
-        this.entity = entity == null || serializedEntity != null ? null : AqValues.body(entity);
-        this.serializedEntity = serializedEntity;
-        this.bodyAvailable = bodyAvailable;
-        this.properties = AqValues.properties(properties);
-        this.headers = AqValues.headers(this.properties);
-        this.localMetadata = AqMessageMetadata.snapshot(message);
-        this.recipients = List.of();
-        this.messageId = Optional.ofNullable(message.getJMSMessageID());
-        this.correlationId = Optional.ofNullable(message.getJMSCorrelationID());
-        this.type = message instanceof AdtMessage ? Optional.empty() : Optional.ofNullable(message.getJMSType());
-        Destination destination = message instanceof AdtMessage ? null : message.getJMSReplyTo();
-        if (destination instanceof AQjmsDestination aq) {
-            // Oracle destinations implement both Queue and Topic; only the matching name accessor returns a value.
-            this.replyTo = Optional.of(aq.getCompleteName());
-            this.replyToType = aq.getQueueName() == null ? AqDestinationType.TOPIC : AqDestinationType.QUEUE;
-        } else {
-            this.replyTo = destinationName(destination);
-            this.replyToType = destination instanceof Topic ? AqDestinationType.TOPIC : AqDestinationType.QUEUE;
-        }
-        this.replyToAgent = destination instanceof AQjmsAgent agent ? sender(agent) : Optional.empty();
-        this.timestamp = OptionalLong.of(message.getJMSTimestamp());
-        this.expiration = OptionalLong.of(message.getJMSExpiration());
-        this.priority = OptionalInt.of(message.getJMSPriority());
-        this.deliveryMode = OptionalInt.of(message.getJMSDeliveryMode());
-        this.redelivered = Optional.of(message.getJMSRedelivered());
-        if (message instanceof AQjmsMessage aq) {
-            this.attempts = OptionalInt.of(aq.getAttempts());
-            this.sender = sender(aq.getSenderID());
-        } else {
-            this.attempts = OptionalInt.empty();
-            this.sender = Optional.empty();
-        }
-    }
+    String RECEIVED_DELIVERY_DELAY_METADATA = "helidon.messaging.aq.received.delivery-delay-seconds";
 
     /**
      * Create an outgoing message builder.
@@ -213,8 +117,8 @@ public final class AqMessage<T> implements Message<T> {
      * @param <T> entity type
      * @return builder
      */
-    public static <T> AqMessageConfig.Builder<T> builder() {
-        return AqMessageConfig.builder();
+    static <T> AqMessageConfig.Builder<T> builder() {
+        return AqOutgoingMessage.builder();
     }
 
     /**
@@ -227,7 +131,7 @@ public final class AqMessage<T> implements Message<T> {
      * @throws IllegalArgumentException if the entity is a map
      * @throws NullPointerException if the entity is {@code null}
      */
-    public static <T> AqMessageConfig.Builder<T> builder(T entity) {
+    static <T> AqMessageConfig.Builder<T> builder(T entity) {
         if (entity instanceof Map<?, ?>) {
             throw new IllegalArgumentException("AQ map payloads must use mapBuilder or the Map-typed create overload");
         }
@@ -243,7 +147,7 @@ public final class AqMessage<T> implements Message<T> {
      * @return builder
      * @throws NullPointerException if the entity is {@code null}
      */
-    public static <K, V> AqMessageConfig.Builder<Map<K, V>> mapBuilder(Map<K, V> entity) {
+    static <K, V> AqMessageConfig.Builder<Map<K, V>> mapBuilder(Map<K, V> entity) {
         return AqMessage.<Map<K, V>>builder().entity(Objects.requireNonNull(entity));
     }
 
@@ -258,7 +162,7 @@ public final class AqMessage<T> implements Message<T> {
      * @throws IllegalArgumentException if the entity is a map
      * @throws NullPointerException if the entity is {@code null}
      */
-    public static <T> AqMessage<T> create(T entity) {
+    static <T> AqMessage<T> create(T entity) {
         return builder(entity).build();
     }
 
@@ -271,77 +175,46 @@ public final class AqMessage<T> implements Message<T> {
      * @return map message
      * @throws NullPointerException if the entity is {@code null}
      */
-    public static <K, V> AqMessage<Map<K, V>> create(Map<K, V> entity) {
+    static <K, V> AqMessage<Map<K, V>> create(Map<K, V> entity) {
         return mapBuilder(entity).build();
     }
 
-    static <T> AqMessage<T> create(AqMessageConfig<T> config) {
-        return new AqMessage<>(Objects.requireNonNull(config), true);
-    }
-
-    static AqMessage<?> incoming(Object entity, byte[] serialized, Map<String, Object> properties,
-                                 javax.jms.Message message, boolean bodyAvailable) throws JMSException {
-        return new AqMessage<>(entity, serialized, properties, message, bodyAvailable);
-    }
-
-    static AqMessage<?> unavailable() {
-        return new AqMessage<>(AqMessageConfig.builder().entity(UnavailableBody.INSTANCE).buildPrototype(), false);
-    }
+    @Override
+    T entity();
 
     @Override
-    @SuppressWarnings("unchecked")
-    public T entity() {
-        if (!bodyAvailable) {
-            throw new MessagingException("AQ message body is unavailable");
-        }
-        return (T) (serializedEntity == null ? AqValues.body(entity) : AqValues.deserialize(serializedEntity));
-    }
+    MessageHeaders headers();
 
     @Override
-    public MessageHeaders headers() {
-        return headers;
-    }
-
-    @Override
-    public MessageMetadata localMetadata() {
-        return localMetadata;
-    }
+    MessageMetadata localMetadata();
 
     /**
      * Whether payload mapping succeeded.
      *
      * @return availability of the entity
      */
-    public boolean bodyAvailable() {
-        return bodyAvailable;
-    }
+    boolean bodyAvailable();
 
     /**
      * Native message identifier.
      *
      * @return identifier
      */
-    public Optional<String> messageId() {
-        return messageId;
-    }
+    Optional<String> messageId();
 
     /**
      * Correlation identifier.
      *
      * @return identifier
      */
-    public Optional<String> correlationId() {
-        return correlationId;
-    }
+    Optional<String> correlationId();
 
     /**
      * JMS message type, absent for native ADT and XML payloads.
      *
      * @return type
      */
-    public Optional<String> type() {
-        return type;
-    }
+    Optional<String> type();
 
     /**
      * Detached reply-to destination name.
@@ -349,36 +222,28 @@ public final class AqMessage<T> implements Message<T> {
      *
      * @return destination
      */
-    public Optional<String> replyTo() {
-        return replyTo;
-    }
+    Optional<String> replyTo();
 
     /**
      * Native AQ reply-to agent, used by messages from AQ and PL/SQL producers.
      *
      * @return detached reply-to agent
      */
-    public Optional<AqRecipient> replyToAgent() {
-        return replyToAgent;
-    }
+    Optional<AqRecipient> replyToAgent();
 
     /**
      * Reply-to destination kind.
      *
      * @return kind
      */
-    public AqDestinationType replyToType() {
-        return replyToType;
-    }
+    AqDestinationType replyToType();
 
     /**
      * Provider timestamp in milliseconds since the epoch.
      *
      * @return timestamp
      */
-    public OptionalLong timestamp() {
-        return timestamp;
-    }
+    OptionalLong timestamp();
 
     /**
      * Received provider expiration in milliseconds since the epoch.
@@ -386,9 +251,7 @@ public final class AqMessage<T> implements Message<T> {
      *
      * @return expiration
      */
-    public OptionalLong expiration() {
-        return expiration;
-    }
+    OptionalLong expiration();
 
     /**
      * Received provider-assigned priority.
@@ -396,9 +259,7 @@ public final class AqMessage<T> implements Message<T> {
      *
      * @return priority
      */
-    public OptionalInt priority() {
-        return priority;
-    }
+    OptionalInt priority();
 
     /**
      * Received provider delivery mode.
@@ -406,101 +267,40 @@ public final class AqMessage<T> implements Message<T> {
      *
      * @return delivery mode
      */
-    public OptionalInt deliveryMode() {
-        return deliveryMode;
-    }
+    OptionalInt deliveryMode();
 
     /**
      * Native redelivery flag.
      *
      * @return flag
      */
-    public Optional<Boolean> redelivered() {
-        return redelivered;
-    }
+    Optional<Boolean> redelivered();
 
     /**
      * AQ delivery attempt count.
      *
      * @return attempts
      */
-    public OptionalInt attempts() {
-        return attempts;
-    }
+    OptionalInt attempts();
 
     /**
      * Detached AQ sender.
      *
      * @return sender
      */
-    public Optional<AqRecipient> sender() {
-        return sender;
-    }
+    Optional<AqRecipient> sender();
 
     /**
      * Immutable application properties, retaining native numeric widths.
      *
      * @return properties
      */
-    public Map<String, Object> properties() {
-        return properties;
-    }
+    Map<String, Object> properties();
 
     /**
      * Explicit outgoing recipients.
      *
      * @return recipients
      */
-    public List<AqRecipient> recipients() {
-        return recipients;
-    }
-
-    Object entityForMapping(boolean allowObjectMessages) {
-        if (serializedEntity != null && !allowObjectMessages) {
-            throw new MessagingException("AQ ObjectMessage is disabled; enable allow-object-messages only for trusted data");
-        }
-        return entity();
-    }
-
-    boolean objectBody() {
-        return serializedEntity != null;
-    }
-
-    private static Optional<String> destinationName(Destination destination) throws JMSException {
-        if (destination instanceof Queue queue) {
-            return Optional.of(queue.getQueueName());
-        }
-        if (destination instanceof Topic topic) {
-            return Optional.of(topic.getTopicName());
-        }
-        if (destination == null || destination instanceof AQjmsAgent) {
-            return Optional.empty();
-        }
-        throw new MessagingException("Unsupported AQ reply-to destination");
-    }
-
-    private static Optional<AqRecipient> sender(AQjmsAgent sender) {
-        if (sender == null) {
-            return Optional.empty();
-        }
-        try {
-            if (sender.getName() == null && sender.getAddress() == null) {
-                return Optional.empty();
-            }
-            AqRecipient.Builder builder = AqRecipient.builder().protocol(sender.getProtocol());
-            if (sender.getName() != null) {
-                builder.name(sender.getName());
-            }
-            if (sender.getAddress() != null) {
-                builder.address(sender.getAddress());
-            }
-            return Optional.of(builder.build());
-        } catch (SQLException e) {
-            throw new MessagingException("Cannot snapshot AQ sender", e);
-        }
-    }
-
-    private enum UnavailableBody {
-        INSTANCE
-    }
+    List<AqRecipient> recipients();
 }

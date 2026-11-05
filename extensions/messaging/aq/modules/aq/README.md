@@ -163,7 +163,15 @@ and arbitrary objects need application conversion into a supported native payloa
 Incoming StreamMessage and ordinary header-only JMS messages are unsupported; native decoding fails before an
 incoming `AqPayloadConverter` is invoked.
 
-`AqMessage<T>` is a detached message envelope. It carries the payload, correlation identifier, JMS type,
+`AqMessage<T>` is the common sealed interface for detached incoming and outgoing message envelopes.
+The generated `AqMessageConfig.Builder<T>` creates an `AqOutgoingMessage<T>`. Use the existing
+`AqMessage.builder(...)` conveniences, or construct the outgoing runtime directly with
+`AqOutgoingMessage.create(config)` or `AqOutgoingMessage.create(builderConsumer)`.
+Its `prototype()` returns the configuration supplied at construction; the runtime retains independent snapshots of
+binary payloads, map structure and application properties. The prototype itself does not deep-freeze application
+objects. Incoming messages use a separate connector-owned snapshot implementation and have no construction prototype.
+
+The common envelope carries the payload, correlation identifier, JMS type,
 reply-to destination, supported application properties, and explicit recipient list. Incoming metadata also
 includes the provider message ID, timestamp, expiry, priority, delivery mode, redelivery state, delivery
 attempts, and AQ sender when available. Availability depends on the queue payload and provider. Properties

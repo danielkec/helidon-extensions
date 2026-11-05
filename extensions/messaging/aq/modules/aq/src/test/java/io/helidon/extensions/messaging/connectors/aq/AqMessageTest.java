@@ -25,16 +25,66 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import io.helidon.messaging.MessageHeaderValue;
 
 import org.junit.jupiter.api.Test;
 
 import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class AqMessageTest {
+    @Test
+    void outgoingFactoriesRetainPrototypeAndSnapshotPayload() {
+        byte[] bytes = {1, 2};
+        AqMessageConfig<byte[]> config = AqMessageConfig.<byte[]>builder().entity(bytes)
+                .correlationId("order-1").putProperty("attempt", (short) 2)
+                .localMetadata("local", "private").buildPrototype();
+
+        AqOutgoingMessage<byte[]> direct = AqOutgoingMessage.create(config);
+        AqOutgoingMessage<byte[]> fromPrototype = config.build();
+        assertThat(direct.prototype(), sameInstance(config));
+        assertThat(fromPrototype.prototype(), sameInstance(config));
+        config.entity()[0] = 9;
+        direct.entity()[1] = 8;
+
+        AqMessage<byte[]> common = direct;
+        assertThat(common.entity(), is(new byte[]{1, 2}));
+        assertThat(fromPrototype.entity(), is(new byte[]{1, 2}));
+        assertThat(common.bodyAvailable(), is(true));
+        assertThat(common.correlationId().orElseThrow(), is("order-1"));
+        assertThat(common.headerValue("attempt").orElseThrow(), is(MessageHeaderValue.IntegerValue.create(2)));
+        assertThat(common.localMetadata().text("local").orElseThrow(), is("private"));
+        assertThat(common.messageId().isEmpty(), is(true));
+        assertThat(common.timestamp().isEmpty(), is(true));
+        assertThrows(NullPointerException.class, () -> AqOutgoingMessage.create((AqMessageConfig<String>) null));
+        assertThrows(NullPointerException.class,
+                     () -> AqOutgoingMessage.create((Consumer<AqMessageConfig.Builder<String>>) null));
+    }
+
+    @Test
+    void outgoingBuilderAndConsumerFactoriesSnapshotApplicationMaps() {
+        byte[] bytes = {1, 2};
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("binary", bytes);
+        AqOutgoingMessage<Map<String, Object>> built = AqOutgoingMessage.<Map<String, Object>>builder()
+                .entity(payload).build();
+        AqOutgoingMessage<Map<String, Object>> supplied = AqOutgoingMessage.<Map<String, Object>>create(builder ->
+                builder.entity(payload).correlationId("consumer"));
+        bytes[0] = 9;
+        payload.clear();
+        ((byte[]) built.entity().get("binary"))[1] = 8;
+
+        assertThat((byte[]) built.entity().get("binary"), is(new byte[]{1, 2}));
+        assertThat((byte[]) supplied.entity().get("binary"), is(new byte[]{1, 2}));
+        assertThat(supplied.correlationId().orElseThrow(), is("consumer"));
+        assertThat(supplied.prototype().correlationId(), is(supplied.correlationId()));
+        assertThrows(UnsupportedOperationException.class, () -> supplied.entity().put("new", true));
+    }
+
     @Test
     void snapshotsBinaryBodiesAndTypedProperties() {
         byte[] bytes = {1, 2};

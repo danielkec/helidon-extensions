@@ -70,6 +70,57 @@ import static org.mockito.Mockito.when;
 
 class AqMessageMapperTest {
     @Test
+    void incomingAndOutgoingExposeTheSameMessageMetadataContract() throws Exception {
+        TextMessage incoming = mock(TextMessage.class);
+        when(incoming.getText()).thenReturn("body");
+        when(incoming.getJMSMessageID()).thenReturn("ID:received");
+        when(incoming.getJMSCorrelationID()).thenReturn("order-1");
+        when(incoming.getJMSType()).thenReturn("order");
+        when(incoming.getJMSTimestamp()).thenReturn(42L);
+        when(incoming.getPropertyNames()).thenReturn(Collections.enumeration(List.of("count")));
+        when(incoming.getObjectProperty("count")).thenReturn((short) 2);
+        AqMessage<?> received = AqMessageMapper.fromNative(incoming, config(AqPayloadType.JMS, false));
+        AqMessage<String> outgoing = AqMessage.builder("body").correlationId("order-1")
+                .type("order").putProperty("count", (short) 2).build();
+
+        assertThat(received.entity(), is(outgoing.entity()));
+        assertThat(received.bodyAvailable(), is(outgoing.bodyAvailable()));
+        assertThat(received.correlationId(), is(outgoing.correlationId()));
+        assertThat(received.type(), is(outgoing.type()));
+        assertThat(received.properties(), is(outgoing.properties()));
+        assertThat(received.headerValue("count"), is(outgoing.headerValue("count")));
+        assertThat(received.recipients(), is(outgoing.recipients()));
+        assertThat(received.messageId().orElseThrow(), is("ID:received"));
+        assertThat(received.timestamp().orElseThrow(), is(42L));
+        assertThat(outgoing.messageId().isEmpty(), is(true));
+        assertThat(outgoing.timestamp().isEmpty(), is(true));
+    }
+
+    @Test
+    void unavailableIncomingBodyForwardsOnlyToJmsWithItsMetadata() throws Exception {
+        TextMessage incoming = mock(TextMessage.class);
+        when(incoming.getJMSMessageID()).thenReturn("ID:rejected");
+        when(incoming.getJMSCorrelationID()).thenReturn("order-1");
+        when(incoming.getPropertyNames()).thenReturn(Collections.enumeration(List.of("count")));
+        when(incoming.getObjectProperty("count")).thenReturn((short) 2);
+        AqMessage<?> rejected = AqMessageMapper.metadataOnly(incoming);
+        assertThat(rejected.bodyAvailable(), is(false));
+        assertThat(rejected.messageId().orElseThrow(), is("ID:rejected"));
+        assertThrows(MessagingException.class, rejected::entity);
+
+        Session session = mock(Session.class);
+        javax.jms.Message forwarded = mock(javax.jms.Message.class);
+        when(session.createMessage()).thenReturn(forwarded);
+        assertThat(AqMessageMapper.toNative(session, rejected, config(AqPayloadType.JMS, false)), sameInstance(forwarded));
+        verify(forwarded).setJMSCorrelationID("order-1");
+        verify(forwarded).setObjectProperty("count", (short) 2);
+        assertThrows(MessagingException.class,
+                     () -> AqMessageMapper.toNative(session, rejected, config(AqPayloadType.ADT, false)));
+        assertThrows(MessagingException.class,
+                     () -> AqMessageMapper.toNative(session, rejected, config(AqPayloadType.XML, false)));
+    }
+
+    @Test
     void mapsTextHeadersAndReplyTo() throws Exception {
         Session session = mock(Session.class);
         TextMessage nativeMessage = mock(TextMessage.class);
@@ -227,7 +278,22 @@ class AqMessageMapperTest {
         assertThat(rejected.bodyAvailable(), is(false));
         assertThat(rejected.messageId().isEmpty(), is(true));
         assertThat(rejected.headers().entries().isEmpty(), is(true));
+        assertThat(rejected.localMetadata().values().isEmpty(), is(true));
+        assertThat(rejected.properties().isEmpty(), is(true));
+        assertThat(rejected.timestamp().isEmpty(), is(true));
+        assertThat(rejected.expiration().isEmpty(), is(true));
+        assertThat(rejected.priority().isEmpty(), is(true));
+        assertThat(rejected.deliveryMode().isEmpty(), is(true));
+        assertThat(rejected.redelivered().isEmpty(), is(true));
+        assertThat(rejected.attempts().isEmpty(), is(true));
+        assertThat(rejected.sender().isEmpty(), is(true));
         assertThrows(MessagingException.class, rejected::entity);
+
+        Session session = mock(Session.class);
+        javax.jms.Message forwarded = mock(javax.jms.Message.class);
+        when(session.createMessage()).thenReturn(forwarded);
+        assertThat(AqMessageMapper.toNative(session, rejected, config(AqPayloadType.JMS, false)), sameInstance(forwarded));
+        verify(session).createMessage();
     }
 
     @Test

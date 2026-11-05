@@ -29,11 +29,6 @@ final class AqMessageSupport {
     private AqMessageSupport() {
     }
 
-    @Prototype.RuntimeTypeFactoryMethod("message")
-    static <T> AqMessage<T> create(AqMessageConfig<T> config) {
-        return AqMessage.create(config);
-    }
-
     /**
      * Set the delay before this message becomes available for dequeue.
      * Stores {@link io.helidon.extensions.messaging.connectors.aq.AqMessage#DELIVERY_DELAY_METADATA}

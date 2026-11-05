@@ -34,7 +34,7 @@ import io.helidon.messaging.MessageHeaderValue;
 @Prototype.Blueprint(decorator = AqMessageSupport.BuilderDecorator.class)
 @Prototype.Sealed
 @Prototype.CustomMethods(AqMessageSupport.class)
-interface AqMessageConfigBlueprint<T> extends Prototype.Factory<AqMessage<T>> {
+interface AqMessageConfigBlueprint<T> extends Prototype.Factory<AqOutgoingMessage<T>> {
     /**
      * Non-null entity. Use the Map interface as the type of map entities.
      *
