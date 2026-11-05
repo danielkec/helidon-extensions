@@ -423,6 +423,9 @@ Established channels reconnect automatically after recognized database or networ
 obtains a fresh connection from the same application-owned data source or connection factory and restores the AQ
 session, destination, selector, recipient or durable subscription. The data source and its pool remain open.
 Initial startup makes one connection attempt, bounded by `reconnect.connect-timeout`.
+If that attempt times out, graph startup throws `AqConnectionTimeoutException`, which applications can catch.
+This startup failure differs from an outgoing send's `reconnect.wait-timeout` failure, which reports a
+`BatchDeliveryException` with its items not attempted.
 
 An outgoing connection failure fails the current send with its original per-message outcomes. The connector does
 not replay that send. A later send waits up to `reconnect.wait-timeout` for recovery; if no connection becomes available,

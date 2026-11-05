@@ -16,9 +16,16 @@
 
 package io.helidon.extensions.messaging.connectors.aq;
 
+import io.helidon.common.Api;
 import io.helidon.messaging.MessagingException;
 
-final class AqConnectionTimeoutException extends MessagingException {
+/**
+ * AQ channel initialization exceeded the configured connection timeout.
+ * During initial startup, this exception can propagate from
+ * {@link io.helidon.messaging.MessagingGraph#start()}.
+ */
+@Api.Incubating
+public final class AqConnectionTimeoutException extends MessagingException {
     AqConnectionTimeoutException(String message) {
         super(message);
     }
