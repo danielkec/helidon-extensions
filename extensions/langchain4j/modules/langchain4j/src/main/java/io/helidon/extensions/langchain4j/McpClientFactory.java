@@ -31,6 +31,7 @@ import io.helidon.webclient.api.WebClientConfig;
 
 import dev.langchain4j.mcp.client.DefaultMcpClient;
 import dev.langchain4j.mcp.client.McpClient;
+import dev.langchain4j.mcp.client.McpRoot;
 import dev.langchain4j.mcp.client.transport.http.StreamableHttpMcpTransport;
 
 @Service.Singleton
@@ -115,6 +116,8 @@ class McpClientFactory implements Service.ServicesFactory<McpClient> {
 
         mcpClientConfig.logRequests().ifPresent(transport::logRequests);
         mcpClientConfig.logResponses().ifPresent(transport::logResponses);
+        transport.subsidiaryChannel(mcpClientConfig.subsidiaryChannel());
+        transport.customHeaders(mcpClientConfig.customHeaders());
         return transport.build();
     }
 
@@ -134,11 +137,25 @@ class McpClientFactory implements Service.ServicesFactory<McpClient> {
             mcpClientConfig.protocolVersion().ifPresent(builder::protocolVersion);
             mcpClientConfig.toolExecutionTimeoutErrorMessage().ifPresent(builder::toolExecutionTimeoutErrorMessage);
             mcpClientConfig.initializationTimeout().ifPresent(builder::initializationTimeout);
+            mcpClientConfig.protocolDetectionTimeout().ifPresent(builder::protocolDetectionTimeout);
             mcpClientConfig.toolExecutionTimeout().ifPresent(builder::toolExecutionTimeout);
             mcpClientConfig.pingTimeout().ifPresent(builder::pingTimeout);
             mcpClientConfig.promptsTimeout().ifPresent(builder::promptsTimeout);
             mcpClientConfig.reconnectInterval().ifPresent(builder::reconnectInterval);
             mcpClientConfig.resourcesTimeout().ifPresent(builder::resourcesTimeout);
+            builder.autoHealthCheck(mcpClientConfig.autoHealthCheck());
+            builder.autoHealthCheckInterval(mcpClientConfig.autoHealthCheckInterval());
+            builder.cacheToolList(mcpClientConfig.cacheToolList());
+            builder.cacheResourceList(mcpClientConfig.cacheResourceList());
+            builder.cachePromptList(mcpClientConfig.cachePromptList());
+            builder.subscribeToToolListChanges(mcpClientConfig.subscribeToToolListChanges());
+            builder.subscribeToResourceListChanges(mcpClientConfig.subscribeToResourceListChanges());
+            builder.subscribeToPromptListChanges(mcpClientConfig.subscribeToPromptListChanges());
+            builder.multiRoundTripMaxRetries(mcpClientConfig.multiRoundTripMaxRetries());
+            builder.roots(mcpClientConfig.roots().stream()
+                                  .map(root -> new McpRoot(root.name().orElseGet(() -> root.uri().toString()),
+                                                          root.uri().toString()))
+                                  .toList());
 
             return new ManagedClient(builder.build(), adapter, webClient);
         } catch (RuntimeException | Error failure) {

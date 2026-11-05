@@ -177,4 +177,99 @@ public class McpClientConfigTest {
         assertThat(config.webClientConfig().connectTimeout(), optionalValue(is(Duration.ofSeconds(4))));
         assertThat(config.webClientConfig().readTimeout(), optionalValue(is(Duration.ZERO)));
     }
+
+    @Test
+    void testAdditionalClientOptions() {
+        var config = McpClientConfig.create(Config.just("""
+                uri: http://localhost/mcp
+                auto-health-check: false
+                auto-health-check-interval: PT9S
+                protocol-detection-timeout: PT3S
+                cache-tool-list: false
+                cache-resource-list: false
+                cache-prompt-list: false
+                subscribe-to-tool-list-changes: false
+                subscribe-to-resource-list-changes: false
+                subscribe-to-prompt-list-changes: false
+                multi-round-trip-max-retries: 7
+                subsidiary-channel: true
+                custom-headers:
+                  X-Api-Key: sample-key
+                roots:
+                  - uri: file:///tmp/project
+                    name: project
+                  - uri: file:///tmp/shared
+                """, APPLICATION_YAML));
+        assertThat(config.autoHealthCheck(), is(false));
+        assertThat(config.autoHealthCheckInterval(), is(Duration.ofSeconds(9)));
+        assertThat(config.protocolDetectionTimeout(), optionalValue(is(Duration.ofSeconds(3))));
+        assertThat(config.cacheToolList(), is(false));
+        assertThat(config.cacheResourceList(), is(false));
+        assertThat(config.cachePromptList(), is(false));
+        assertThat(config.subscribeToToolListChanges(), is(false));
+        assertThat(config.subscribeToResourceListChanges(), is(false));
+        assertThat(config.subscribeToPromptListChanges(), is(false));
+        assertThat(config.multiRoundTripMaxRetries(), is(7));
+        assertThat(config.subsidiaryChannel(), is(true));
+        assertThat(config.customHeaders().get("X-Api-Key"), is("sample-key"));
+        assertThat(config.roots().size(), is(2));
+        assertThat(config.roots().get(0).uri(), is(URI.create("file:///tmp/project")));
+        assertThat(config.roots().get(0).name(), optionalValue(is("project")));
+        assertThat(config.roots().get(1).uri(), is(URI.create("file:///tmp/shared")));
+        assertThat(config.roots().get(1).name().isEmpty(), is(true));
+    }
+
+    @Test
+    void testMcpClientDefaults() {
+        var config = McpClientConfig.builder().uri(URI.create("http://localhost/mcp")).build();
+        assertThat(config.clientName(), optionalValue(is("langchain4j")));
+        assertThat(config.clientVersion(), optionalValue(is("1.0")));
+        assertThat(config.initializationTimeout(), optionalValue(is(Duration.ofSeconds(30))));
+        assertThat(config.toolExecutionTimeout(), optionalValue(is(Duration.ofSeconds(60))));
+        assertThat(config.resourcesTimeout(), optionalValue(is(Duration.ofSeconds(60))));
+        assertThat(config.promptsTimeout(), optionalValue(is(Duration.ofSeconds(60))));
+        assertThat(config.pingTimeout(), optionalValue(is(Duration.ofSeconds(10))));
+        assertThat(config.reconnectInterval(), optionalValue(is(Duration.ofSeconds(5))));
+        assertThat(config.toolExecutionTimeoutErrorMessage(), optionalValue(is("There was a timeout executing the tool")));
+        assertThat(config.logRequests(), optionalValue(is(false)));
+        assertThat(config.logResponses(), optionalValue(is(false)));
+        assertThat(config.autoHealthCheck(), is(true));
+        assertThat(config.autoHealthCheckInterval(), is(Duration.ofSeconds(30)));
+        assertThat(config.protocolDetectionTimeout().isEmpty(), is(true));
+        assertThat(config.cacheToolList(), is(true));
+        assertThat(config.cacheResourceList(), is(true));
+        assertThat(config.cachePromptList(), is(true));
+        assertThat(config.subscribeToToolListChanges(), is(true));
+        assertThat(config.subscribeToResourceListChanges(), is(true));
+        assertThat(config.subscribeToPromptListChanges(), is(true));
+        assertThat(config.multiRoundTripMaxRetries(), is(3));
+        assertThat(config.subsidiaryChannel(), is(false));
+        assertThat(config.customHeaders().isEmpty(), is(true));
+        assertThat(config.roots().isEmpty(), is(true));
+    }
+
+    @Test
+    void testDerivedProtocolDetectionTimeoutRemainsUnset() {
+        var config = McpClientConfig.create(Config.just("""
+                uri: http://localhost/mcp
+                initialization-timeout: PT8S
+                """, APPLICATION_YAML));
+        assertThat(config.initializationTimeout(), optionalValue(is(Duration.ofSeconds(8))));
+        assertThat(config.protocolDetectionTimeout().isEmpty(), is(true));
+    }
+
+    @Test
+    void testExplicitZeroOverrides() {
+        var config = McpClientConfig.create(Config.just("""
+                uri: http://localhost/mcp
+                tool-execution-timeout: PT0S
+                resources-timeout: PT0S
+                prompts-timeout: PT0S
+                multi-round-trip-max-retries: 0
+                """, APPLICATION_YAML));
+        assertThat(config.toolExecutionTimeout(), optionalValue(is(Duration.ZERO)));
+        assertThat(config.resourcesTimeout(), optionalValue(is(Duration.ZERO)));
+        assertThat(config.promptsTimeout(), optionalValue(is(Duration.ZERO)));
+        assertThat(config.multiRoundTripMaxRetries(), is(0));
+    }
 }

@@ -35,11 +35,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import io.helidon.common.context.Context;
+import io.helidon.common.context.Contexts;
 import io.helidon.security.SecurityContext;
 import io.helidon.tracing.SpanContext;
 import io.helidon.webserver.WebServer;
@@ -50,7 +53,9 @@ import io.helidon.webserver.security.SecurityFeature;
 
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.mcp.client.DefaultMcpClient;
+import dev.langchain4j.mcp.client.McpCallContext;
 import dev.langchain4j.mcp.client.McpClient;
+import dev.langchain4j.mcp.client.McpClientListener;
 import dev.langchain4j.mcp.client.transport.http.StreamableHttpMcpTransport;
 import dev.langchain4j.spi.ExecutorProvider;
 import io.opentelemetry.api.trace.SpanKind;
@@ -208,6 +213,48 @@ class HelidonMcpKeycloakIT {
         }
     }
 
+    @Test
+    void explicitHealthCheckRetainsKeycloakAuthorizationWithBackgroundChecksDisabled() throws Exception {
+        String baseUrl = System.getProperty("keycloak.url");
+        if (baseUrl == null || baseUrl.isBlank()) {
+            throw new IllegalStateException("keycloak.url is required when keycloak-e2e is active");
+        }
+        String normalizedBase = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        URI issuerUri = URI.create(normalizedBase + "/realms/" + REALM);
+        try (HttpClient rawHttpClient = HttpClient.newBuilder().connectTimeout(TIMEOUT).build()) {
+            String aliceToken = token(rawHttpClient, issuerUri, ALICE, "alice-test-only");
+            Context sessionContext = Context.create();
+            sessionContext.register(PropagationTestSupport.AUTHORIZATION_CLASSIFIER, "Bearer " + aliceToken);
+            AtomicInteger healthyPings = new AtomicInteger();
+            McpClientListener listener = new McpClientListener() {
+                @Override
+                public void afterPing(McpCallContext context) {
+                    healthyPings.incrementAndGet();
+                }
+            };
+            try (PropagationTestSupport propagation = PropagationTestSupport.create();
+                    SecuredMcpServer mcpServer = SecuredMcpServer.start(issuerUri, AUDIENCE, propagation.tracer())) {
+                var webClient = propagation.createWebClient(mcpServer.url());
+                try (HelidonHttpClient adapter = HelidonHttpClient.builder().webClient(webClient).build();
+                        StreamableHttpMcpTransport transport = StreamableHttpMcpTransport.builder()
+                                .url(mcpServer.url().toString())
+                                .httpClient(adapter)
+                                .build();
+                        DefaultMcpClient client = Contexts.runInContext(sessionContext, () -> new DefaultMcpClient.Builder()
+                                .transport(transport)
+                                .protocolVersion("2025-11-25")
+                                // Equivalent to auto-health-check: false until the pinned dependency fixes
+                                // https://github.com/langchain4j/langchain4j/issues/6984.
+                                .autoHealthCheck(false)
+                                .addListener(listener)
+                                .build())) {
+                    Contexts.runInContext(sessionContext, client::checkHealth);
+                    assertThat("explicit health check completed with authentication", healthyPings.get(), is(1));
+                }
+            }
+        }
+    }
+
     private static void invoke(ServerRequest request, ServerResponse response, IngressState state) {
         try {
             String nonce = new String(request.content().inputStream().readAllBytes(), StandardCharsets.UTF_8);
@@ -252,6 +299,8 @@ class HelidonMcpKeycloakIT {
             if (client == null) {
                 client = new DefaultMcpClient.Builder()
                         .transport(transport)
+                        // Workaround for https://github.com/langchain4j/langchain4j/issues/6984:
+                        // background maintenance has no caller context in the pinned dependency.
                         .autoHealthCheck(false)
                         .build();
                 clients.set(client);

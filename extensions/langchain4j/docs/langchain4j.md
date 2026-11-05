@@ -271,6 +271,48 @@ overrides `web-client.tls`. The service registry closes the MCP clients and HTTP
 resources it creates during shutdown. Applications using the HTTP adapter
 directly can supply an existing WebClient and retain ownership of it.
 
+The following options configure MCP client behavior and the HTTP transport:
+
+```yaml [application.yaml]
+langchain4j:
+  mcp-clients:
+    tools:
+      uri: https://tools.example.com/mcp
+      auto-health-check: false
+      auto-health-check-interval: PT30S
+      protocol-detection-timeout: PT5S
+      cache-tool-list: false
+      cache-resource-list: true
+      cache-prompt-list: true
+      subscribe-to-tool-list-changes: true
+      subscribe-to-resource-list-changes: true
+      subscribe-to-prompt-list-changes: true
+      multi-round-trip-max-retries: 3
+      subsidiary-channel: false
+      custom-headers:
+        X-Application: helidon
+      roots:
+        - uri: file:///workspace/project
+          name: project
+        - uri: file:///workspace/shared
+```
+
+Automatic health checks default to enabled at a 30-second interval. Set
+`auto-health-check: false` if maintenance requests cannot authenticate without
+the caller's context; this disables the periodic check and its reconnect attempt.
+Protocol detection defaults to the effective `initialization-timeout`, including
+an explicitly configured timeout. Set `protocol-detection-timeout` only when the
+discovery request needs a different timeout.
+Roots and the subsidiary SSE channel are used by legacy MCP protocols through
+2025-11-25. List-change subscriptions and multi-round-trip retry settings apply
+to MCP protocol 2026-07-28 and later. If a root's `name` is omitted, its URI is
+used as the advertised name.
+
+Static `custom-headers` apply to every transport request. When a native context
+service has a value for the same header, that contextual value replaces the
+static one; otherwise the static value is sent. Set native WebClient connect and
+read timeouts under `web-client`, and operation timeouts on the MCP client.
+
 See the [HTTP client module](../modules/http-client/README.md) for direct adapter
 usage and the bearer/tracing integration test.
 
