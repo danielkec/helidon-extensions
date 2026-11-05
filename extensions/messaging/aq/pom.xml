@@ -45,6 +45,7 @@
     <properties>
         <messaging.aq.extension.version>27.0.0-SNAPSHOT</messaging.aq.extension.version>
         <helidon.version>27.0.0</helidon.version>
+        <version.plugin.compiler>3.15.0</version.plugin.compiler>
         <version.java>27</version.java>
         <version.lib.aqapi>19.3.0.0</version.lib.aqapi>
         <version.lib.jakarta.jms-api>2.0.3</version.lib.jakarta.jms-api>
