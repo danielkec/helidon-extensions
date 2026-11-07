@@ -25,6 +25,7 @@ import javax.jms.ConnectionFactory;
 import javax.jms.DeliveryMode;
 import javax.sql.DataSource;
 
+import io.helidon.common.Size;
 import io.helidon.config.Config;
 import io.helidon.config.ConfigSources;
 import io.helidon.messaging.spi.MessagingIncomingConfig;
@@ -69,6 +70,7 @@ class AqConfigTest {
         assertThat(incoming.receiveTimeout(), is(Duration.ofMillis(100)));
         assertThat(incoming.closeTimeout(), is(Duration.ofSeconds(10)));
         assertThat(incoming.maxBodyBytes(), is(1_048_576));
+        assertThat(incoming.maxLobCharacters(), is(1_048_576));
         assertThat(incoming.deliveryMode(), is(DeliveryMode.PERSISTENT));
         assertThat(incoming.priority(), is(4));
         assertThat(incoming.timeToLive(), is(Duration.ZERO));
@@ -114,7 +116,8 @@ class AqConfigTest {
                 Map.entry("payload-type", "XML"),
                 Map.entry("receive-timeout", "PT1S"),
                 Map.entry("close-timeout", "PT4S"),
-                Map.entry("max-body-bytes", "2048"))));
+                Map.entry("max-body-bytes", "2048"),
+                Map.entry("max-lob-characters", "17"))));
         AqConnectorConfig defaults = AqConnectorConfig.builder().name("aq").config(config).buildPrototype();
         AqRuntimeConfig runtime = AqRuntimeConfig.incoming(defaults, incoming());
 
@@ -125,12 +128,37 @@ class AqConfigTest {
         assertThat(runtime.receiveTimeout(), is(Duration.ofSeconds(1)));
         assertThat(runtime.closeTimeout(), is(Duration.ofSeconds(4)));
         assertThat(runtime.maxBodyBytes(), is(2048));
+        assertThat(runtime.maxLobCharacters(), is(17));
         assertThat(defaults.toString(), not(containsString("secret-password")));
         assertThat(runtime.toString(), not(containsString("secret-password")));
         assertThat(AqIncomingConfig.builder(incoming()).password("secret-password").build().toString(),
                    not(containsString("secret-password")));
         assertThat(AqOutgoingConfig.builder(outgoing()).password("secret-password").build().toString(),
                    not(containsString("secret-password")));
+    }
+
+    @Test
+    void binarySizeAndLobCharacterLimitInheritIndependently() {
+        AqConnectorConfig defaults = AqConnectorConfig.builder(defaults())
+                .maxBodyBytes(Size.create(2048)).maxLobCharacters(12).buildPrototype();
+        AqRuntimeConfig inherited = AqRuntimeConfig.incoming(defaults, incoming());
+        assertThat(inherited.maxBodyBytes(), is(2048));
+        assertThat(inherited.maxLobCharacters(), is(12));
+
+        AqRuntimeConfig binaryOverride = AqRuntimeConfig.incoming(defaults,
+                AqIncomingConfig.builder(incoming()).maxBodyBytes(Size.parse("3 KiB")).build());
+        assertThat(binaryOverride.maxBodyBytes(), is(3072));
+        assertThat(binaryOverride.maxLobCharacters(), is(12));
+
+        AqRuntimeConfig characterOverride = AqRuntimeConfig.incoming(defaults,
+                AqIncomingConfig.builder(incoming()).maxLobCharacters(5).build());
+        assertThat(characterOverride.maxBodyBytes(), is(2048));
+        assertThat(characterOverride.maxLobCharacters(), is(5));
+
+        Config config = Config.just(ConfigSources.create(Map.of("destination", "ORDERS",
+                                                                "max-body-bytes", "1 MiB")));
+        AqConnectorConfig configured = AqConnectorConfig.builder().name("aq").config(config).buildPrototype();
+        assertThat(AqRuntimeConfig.incoming(configured, incoming()).maxBodyBytes(), is(1_048_576));
     }
 
     @Test
@@ -196,7 +224,19 @@ class AqConfigTest {
                              AqOutgoingConfig.builder(outgoing()).priority(10).build()));
         assertThrows(IllegalArgumentException.class,
                      () -> AqRuntimeConfig.incoming(defaults(),
-                             AqIncomingConfig.builder(incoming()).maxBodyBytes(0).build()));
+                             AqIncomingConfig.builder(incoming()).maxBodyBytes(Size.ZERO).build()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> AqRuntimeConfig.incoming(defaults(),
+                             AqIncomingConfig.builder(incoming()).maxBodyBytes(Size.create(-1)).build()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> AqRuntimeConfig.incoming(defaults(),
+                             AqIncomingConfig.builder(incoming()).maxBodyBytes(Size.create((long) Integer.MAX_VALUE + 1)).build()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> AqRuntimeConfig.incoming(defaults(),
+                             AqIncomingConfig.builder(incoming()).maxBodyBytes(Size.parse("18446744073709551616")).build()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> AqRuntimeConfig.incoming(defaults(),
+                             AqIncomingConfig.builder(incoming()).maxLobCharacters(0).build()));
     }
 
     @Test

@@ -24,6 +24,8 @@ import javax.jms.ConnectionFactory;
 import javax.jms.DeliveryMode;
 import javax.sql.DataSource;
 
+import io.helidon.common.Size;
+
 /**
  * Effective channel settings, kept out of the public configuration API.
  * The destination identifies the direct queue or the JNDI lookup name when JNDI settings are present.
@@ -53,6 +55,7 @@ record AqRuntimeConfig(String channelName,
                        Optional<String> recipientName,
                        boolean noLocal,
                        int maxBodyBytes,
+                       int maxLobCharacters,
                        Duration receiveTimeout,
                        int deliveryMode,
                        int priority,
@@ -114,7 +117,9 @@ record AqRuntimeConfig(String channelName,
                 : inherit(outgoing.enqueueTransformation(), defaults.enqueueTransformation())
                         .filter(AqEnqueueTransformationConfig::enabled)
                         .flatMap(AqEnqueueTransformationConfig::name);
-        int maxBodyBytes = inherit(incoming.maxBodyBytes(), defaults.maxBodyBytes()).orElse(1_048_576);
+        Size bodySize = inherit(incoming.maxBodyBytes(), defaults.maxBodyBytes()).orElseGet(() -> Size.create(1_048_576));
+        int maxBodyBytes = requireBodyBytes(bodySize);
+        int maxLobCharacters = inherit(incoming.maxLobCharacters(), defaults.maxLobCharacters()).orElse(1_048_576);
         int deliveryMode = inherit(outgoing.deliveryMode(), defaults.deliveryMode()).orElse(DeliveryMode.PERSISTENT);
         int priority = inherit(outgoing.priority(), defaults.priority()).orElse(4);
         requireNonBlank("destination", Optional.of(destination));
@@ -130,8 +135,8 @@ record AqRuntimeConfig(String channelName,
         requireMillis("receive-timeout", receiveTimeout, false);
         requireMillis("close-timeout", closeTimeout, false);
         requireMillis("time-to-live", timeToLive, true);
-        if (maxBodyBytes < 1) {
-            throw new IllegalArgumentException("max-body-bytes must be greater than zero");
+        if (maxLobCharacters < 1) {
+            throw new IllegalArgumentException("max-lob-characters must be greater than zero");
         }
         if (deliveryMode != DeliveryMode.PERSISTENT && deliveryMode != DeliveryMode.NON_PERSISTENT) {
             throw new IllegalArgumentException("delivery-mode must be 1 (nonpersistent) or 2 (persistent)");
@@ -183,6 +188,7 @@ record AqRuntimeConfig(String channelName,
                                    recipient,
                                    noLocal,
                                    maxBodyBytes,
+                                   maxLobCharacters,
                                    receiveTimeout,
                                    deliveryMode,
                                    priority,
@@ -192,6 +198,18 @@ record AqRuntimeConfig(String channelName,
 
     private static <T> Optional<T> inherit(Optional<T> channel, Optional<T> defaults) {
         return channel.or(() -> defaults);
+    }
+
+    private static int requireBodyBytes(Size size) {
+        try {
+            long bytes = size.toBytes();
+            if (bytes < 1 || bytes > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("max-body-bytes must be between 1 and " + Integer.MAX_VALUE + " bytes");
+            }
+            return (int) bytes;
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("max-body-bytes must be between 1 and " + Integer.MAX_VALUE + " bytes", e);
+        }
     }
 
     private static int resourceCount(AqChannelOptions options) {

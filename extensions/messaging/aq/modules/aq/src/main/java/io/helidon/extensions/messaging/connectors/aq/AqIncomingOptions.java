@@ -20,6 +20,7 @@ import java.time.Duration;
 import java.util.Optional;
 
 import io.helidon.builder.api.Option;
+import io.helidon.common.Size;
 
 /**
  * Incoming AQ options inherited from connector configuration.
@@ -67,17 +68,25 @@ interface AqIncomingOptions {
     Optional<Boolean> noLocal();
 
     /**
-     * Maximum size of an incoming bytes-message body or an individual SQL LOB attribute.
-     * Defaults to 1,048,576. The limit counts bytes for bytes-message bodies and BLOBs, and characters
-     * for CLOBs and NCLOBs. Each value is checked before allocating its snapshot, including LOBs in
-     * nested SQL objects and arrays.
-     * This is not an aggregate message-size limit. It does not bound text, XML, map or Java object
-     * message bodies, other SQL attributes, or the total size of an ADT payload.
+     * Maximum size of each incoming bytes-message body or detached SQL BLOB attribute, in bytes.
+     * Defaults to 1 MiB. Each value is checked before allocating its snapshot, including BLOBs in
+     * nested SQL objects and arrays. This is not an aggregate message-size limit. It does not bound
+     * JMS text, XML, map or Java object message bodies, other SQL attributes, or the total size of an ADT payload.
      *
-     * @return maximum bytes or characters per bounded incoming value
+     * @return maximum bytes per bounded binary value
      */
     @Option.Configured
-    Optional<Integer> maxBodyBytes();
+    Optional<Size> maxBodyBytes();
+
+    /**
+     * Maximum number of characters in each incoming detached SQL CLOB or NCLOB attribute.
+     * Defaults to 1,048,576. Each value is checked before allocating its snapshot, including
+     * CLOBs and NCLOBs in nested SQL objects and arrays. This is not a byte or aggregate limit.
+     *
+     * @return maximum characters per detached CLOB or NCLOB
+     */
+    @Option.Configured
+    Optional<Integer> maxLobCharacters();
 
     /**
      * Maximum duration of a receive call. Defaults to 100 milliseconds.

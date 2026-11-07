@@ -161,7 +161,7 @@ final class AqMessageMapper {
             case XML -> XMLType.getORADataFactory();
             case ADT -> (OracleDataFactory) (value, _) -> {
                 try {
-                    Object detached = detach(value, config.maxBodyBytes());
+                    Object detached = detach(value, config.maxBodyBytes(), config.maxLobCharacters());
                     if (!(detached instanceof AqAdt adt) || adt.kind() != AqAdt.Kind.STRUCT) {
                         throw new SQLException("AQ ADT payload must be an Oracle SQL object");
                     }
@@ -214,7 +214,7 @@ final class AqMessageMapper {
         }
         if (message instanceof BytesMessage bytes) {
             long length = bytes.getBodyLength();
-            requireLength(length, config.maxBodyBytes());
+            requireLength(length, config.maxBodyBytes(), "max-body-bytes");
             byte[] result = new byte[(int) length];
             byte[] chunk = new byte[Math.min(8192, result.length)];
             int offset = 0;
@@ -394,29 +394,31 @@ final class AqMessageMapper {
         }
     }
 
-    private static Object detach(Object value, int maxBodyBytes) throws SQLException {
+    private static Object detach(Object value, int maxBodyBytes, int maxLobCharacters) throws SQLException {
         if (value == null) {
             return AqAdt.NullValue.INSTANCE;
         }
         if (value instanceof Struct struct) {
-            return AqAdt.create(struct.getSQLTypeName(), detachAttributes(struct.getAttributes(), maxBodyBytes));
+            return AqAdt.create(struct.getSQLTypeName(),
+                                detachAttributes(struct.getAttributes(), maxBodyBytes, maxLobCharacters));
         }
         if (value instanceof OracleArray array) {
             try (SqlResource _ = array::free) {
-                return AqAdt.createArray(array.getSQLTypeName(), detachAttributes(array.getArray(), maxBodyBytes));
+                return AqAdt.createArray(array.getSQLTypeName(),
+                                         detachAttributes(array.getArray(), maxBodyBytes, maxLobCharacters));
             }
         }
         if (value instanceof Blob blob) {
             try (SqlResource _ = blob::free) {
                 long length = blob.length();
-                requireLength(length, maxBodyBytes);
+                requireLength(length, maxBodyBytes, "max-body-bytes");
                 return AqBlob.create(blob.getBytes(1, (int) length));
             }
         }
         if (value instanceof Clob clob) {
             try (SqlResource _ = clob::free) {
                 long length = clob.length();
-                requireLength(length, maxBodyBytes);
+                requireLength(length, maxLobCharacters, "max-lob-characters");
                 String text = clob.getSubString(1, (int) length);
                 return clob instanceof NClob ? AqClob.createNational(text) : AqClob.create(text);
             }
@@ -429,12 +431,12 @@ final class AqMessageMapper {
         return AqValues.sqlValue(value);
     }
 
-    private static List<Object> detachAttributes(Object values, int maxBodyBytes) throws SQLException {
+    private static List<Object> detachAttributes(Object values, int maxBodyBytes, int maxLobCharacters) throws SQLException {
         List<Object> attributes = new ArrayList<>();
         Exception failure = null;
         for (int i = 0; i < java.lang.reflect.Array.getLength(values); i++) {
             try {
-                attributes.add(detach(java.lang.reflect.Array.get(values, i), maxBodyBytes));
+                attributes.add(detach(java.lang.reflect.Array.get(values, i), maxBodyBytes, maxLobCharacters));
             } catch (SQLException | RuntimeException e) {
                 // Finish detaching siblings so their JDBC resources are released as well.
                 if (failure == null) {
@@ -511,9 +513,9 @@ final class AqMessageMapper {
         }
     }
 
-    private static void requireLength(long length, int maxBodyBytes) {
-        if (length < 0 || length > maxBodyBytes) {
-            throw new MessagingException("AQ payload length " + length + " exceeds max-body-bytes " + maxBodyBytes);
+    private static void requireLength(long length, int limit, String setting) {
+        if (length < 0 || length > limit) {
+            throw new MessagingException("AQ payload length " + length + " exceeds " + setting + " " + limit);
         }
     }
 

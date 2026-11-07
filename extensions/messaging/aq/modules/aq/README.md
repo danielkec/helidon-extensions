@@ -239,9 +239,13 @@ AqClob nationalText = AqClob.createNational("NCLOB content");
 
 An incoming ADT can be forwarded with these values intact. The connector creates temporary LOBs on the sending
 connection and releases them after use. Plain byte arrays and strings remain appropriate for RAW and character
-attributes. `max-body-bytes` bounds each incoming bytes-message body and each detached SQL LOB value independently:
-bytes for BLOB, characters for CLOB/NCLOB. It is not an aggregate message or process-memory limit and does not bound
-text, XML, map or serialized object payload sizes, or the total size of an ADT containing multiple LOBs.
+attributes. `max-body-bytes` is a Helidon `Size` that limits each incoming bytes-message body and detached SQL BLOB
+in bytes. `max-lob-characters` independently limits each detached CLOB or NCLOB by its character count.
+Both default to 1,048,576 in their respective units and inherit independently from connector defaults to channels.
+Neither is an aggregate message or process-memory limit. They do not bound JMS text, XML, map or serialized object
+payload sizes, or the total size of an ADT containing multiple LOBs.
+An existing explicit `max-body-bytes` value no longer changes the CLOB/NCLOB limit; configure
+`max-lob-characters` to retain a previous explicit character limit.
 
 Java object messages are disabled by default because deserialization executes application class code.
 Enable them only for queues whose publishers and serialized classes the application trusts.
@@ -516,7 +520,8 @@ defaults above.
 | `subscription-name` | Incoming | Absent; a nonblank durable subscription name, allowed only with `durable: true` |
 | `recipient-name` | Incoming | Absent; a nonblank explicit AQ recipient, requires `TOPIC` and cannot be combined with durable subscriptions or `no-local: true` |
 | `no-local` | Incoming | `false`; requires `TOPIC` and excludes messages published by the receiving connection according to provider semantics |
-| `max-body-bytes` | Incoming | `1048576`; positive limit on each incoming bytes-message body and each detached SQL LOB value: bytes for BLOB, characters for CLOB/NCLOB |
+| `max-body-bytes` | Incoming | `1048576` bytes (`1 MiB`); Helidon `Size` limited to a positive value at most 2,147,483,647 bytes, applied to each incoming bytes-message body and detached BLOB |
+| `max-lob-characters` | Incoming | `1048576`; positive integer limit on each detached CLOB or NCLOB character value |
 | `receive-timeout` | Incoming | `PT0.1S`; maximum duration of each receive call, at least one millisecond |
 
 Explicit channel `durable: false` also suppresses an inherited `subscription-name`. An explicitly supplied channel

@@ -44,6 +44,7 @@ import javax.sql.DataSource;
 import javax.xml.parsers.DocumentBuilderFactory;
 
 import io.helidon.common.GenericType;
+import io.helidon.common.Size;
 import io.helidon.common.media.type.MediaTypes;
 import io.helidon.config.Config;
 import io.helidon.extensions.messaging.connectors.aq.AqAdt;
@@ -924,6 +925,38 @@ class AqConnectorIT {
     }
 
     @Test
+    void binaryAndCharacterLobLimitsAreIndependent() throws Exception {
+        Receiver receiver = new Receiver();
+        ServiceRegistryManager manager = runtime("LOB_DROP_QUEUE", "payload-type: ADT", """
+                max-body-bytes: 16
+                max-lob-characters: 2
+                failure:
+                  on-exhausted: DROP
+                """, receiver);
+        AqBlob binary = AqBlob.create(new byte[] {1, 2, 3});
+        String typeName = database.schema() + ".AQ_TEST_LOBS";
+        AqAdt longClob = AqAdt.create(typeName,
+                                     List.of(binary, AqClob.create("abc"), AqClob.createNational("漢")));
+        AqAdt longNclob = AqAdt.create(typeName,
+                                      List.of(binary, AqClob.create("é"), AqClob.createNational("漢字三")));
+        AqAdt valid = AqAdt.create(typeName,
+                                  List.of(binary, AqClob.create("éé"), AqClob.createNational("漢字")));
+        messaging(manager).emit("outgoing", AqMessage.builder(longClob).correlationId("long-clob").build());
+        messaging(manager).emit("outgoing", AqMessage.builder(longNclob).correlationId("long-nclob").build());
+        messaging(manager).emit("outgoing", AqMessage.builder(valid).correlationId("valid").build());
+
+        AqMessage<?> received = receiver.await();
+        assertThat(received.correlationId(), is(Optional.of("valid")));
+        AqAdt payload = (AqAdt) received.entity();
+        assertThat(((AqBlob) payload.attributes().getFirst()).bytes(), is(new byte[]{1, 2, 3}));
+        assertThat(((AqClob) payload.attributes().get(1)).text(), is("éé"));
+        assertThat(((AqClob) payload.attributes().get(2)).text(), is("漢字"));
+        manager.shutdown();
+        managers.remove(manager);
+        assertThat("both oversized values and the valid message must be settled", adtAvailable("LOB_DROP_QUEUE"), is(false));
+    }
+
+    @Test
     void oversizedAdtIsDroppedBeforeReceivingTheNextMessage() throws Exception {
         Receiver receiver = new Receiver();
         ServiceRegistryManager manager = runtime("LOB_DROP_QUEUE", "payload-type: ADT", """
@@ -949,7 +982,7 @@ class AqConnectorIT {
         AqConnector connector = AqConnector.builder().name("lob-aq").dataSource(database.dataSource())
                 .schema(database.schema()).destination("LOB_DLQ_QUEUE").payloadType(AqPayloadType.ADT).build();
         AqIncomingConfig incoming = AqIncomingConfig.builder().connector("lob-aq").channelName("incoming")
-                .maxBodyBytes(2)
+                .maxBodyBytes(Size.create(2))
                 .failure(failure -> failure.onExhausted(FailureDisposition.DEAD_LETTER)
                         .deadLetter(deadLetter -> deadLetter.channel("dead-letter")))
                 .build();

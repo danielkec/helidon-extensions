@@ -29,6 +29,7 @@ import java.util.List;
 
 import javax.jms.JMSException;
 
+import io.helidon.common.Size;
 import io.helidon.messaging.Message;
 import io.helidon.messaging.MessagingException;
 
@@ -182,10 +183,41 @@ class AqLobTest {
             when(clob.length()).thenReturn(5L);
             OracleData clobData = detach(struct("APP.VALUE", clob), 4);
             MessagingException clobFailure = assertThrows(MessagingException.class, () -> snapshot(clobData));
-            assertThat(clobFailure.getCause().getMessage(), containsString("exceeds max-body-bytes 4"));
+            assertThat(clobFailure.getCause().getMessage(), containsString("exceeds max-lob-characters 4"));
             verify(clob, never()).getSubString(1, 5);
             verify(clob).free();
         }
+    }
+
+    @Test
+    void appliesIndependentBinaryAndCharacterLimitsToNestedLobs() throws Exception {
+        Blob oversizedBlob = mock(Blob.class);
+        when(oversizedBlob.length()).thenReturn(5L);
+        Clob permittedClob = mock(Clob.class);
+        when(permittedClob.length()).thenReturn(5L);
+        when(permittedClob.getSubString(1, 5)).thenReturn("value");
+
+        OracleData binaryFailure = detach(struct("APP.VALUE", oversizedBlob, permittedClob), 4, 6);
+        MessagingException binary = assertThrows(MessagingException.class, () -> snapshot(binaryFailure));
+        assertThat(binary.getCause().getMessage(), containsString("exceeds max-body-bytes 4"));
+        verify(oversizedBlob, never()).getBytes(1, 5);
+        verify(oversizedBlob).free();
+        verify(permittedClob).getSubString(1, 5);
+        verify(permittedClob).free();
+
+        Blob permittedBlob = mock(Blob.class);
+        when(permittedBlob.length()).thenReturn(5L);
+        when(permittedBlob.getBytes(1, 5)).thenReturn(new byte[5]);
+        NClob oversizedNational = mock(NClob.class);
+        when(oversizedNational.length()).thenReturn(5L);
+
+        OracleData characterFailure = detach(struct("APP.VALUE", permittedBlob, oversizedNational), 6, 4);
+        MessagingException character = assertThrows(MessagingException.class, () -> snapshot(characterFailure));
+        assertThat(character.getCause().getMessage(), containsString("exceeds max-lob-characters 4"));
+        verify(permittedBlob).getBytes(1, 5);
+        verify(permittedBlob).free();
+        verify(oversizedNational, never()).getSubString(1, 5);
+        verify(oversizedNational).free();
     }
 
     @Test
@@ -383,7 +415,11 @@ class AqLobTest {
     }
 
     private static OracleData detach(Struct struct, int limit) throws SQLException {
-        OracleDataFactory factory = (OracleDataFactory) AqMessageMapper.payloadFactory(config(limit));
+        return detach(struct, limit, limit);
+    }
+
+    private static OracleData detach(Struct struct, int binaryLimit, int characterLimit) throws SQLException {
+        OracleDataFactory factory = (OracleDataFactory) AqMessageMapper.payloadFactory(config(binaryLimit, characterLimit));
         return factory.create(struct, Types.STRUCT);
     }
 
@@ -405,8 +441,13 @@ class AqLobTest {
     }
 
     private static AqRuntimeConfig config(int limit) {
+        return config(limit, limit);
+    }
+
+    private static AqRuntimeConfig config(int binaryLimit, int characterLimit) {
         return AqRuntimeConfig.incoming(AqConnectorConfig.builder().name("aq").destination("TEST")
-                                                .payloadType(AqPayloadType.ADT).maxBodyBytes(limit).buildPrototype(),
+                                                .payloadType(AqPayloadType.ADT).maxBodyBytes(Size.create(binaryLimit))
+                                                .maxLobCharacters(characterLimit).buildPrototype(),
                                         AqIncomingConfig.builder().connector("aq").channelName("test").build());
     }
 }

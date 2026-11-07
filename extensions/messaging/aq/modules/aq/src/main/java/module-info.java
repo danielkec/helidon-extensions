@@ -27,12 +27,12 @@ import io.helidon.common.features.api.HelidonFlavor;
 @Features.Incubating
 module io.helidon.extensions.messaging.connectors.aq {
     requires transitive io.helidon.builder.api;
+    requires transitive io.helidon.common;
     requires transitive io.helidon.config;
     requires transitive io.helidon.messaging;
     requires transitive jakarta.jms.api;
     requires transitive java.sql;
 
-    requires io.helidon.common;
     requires io.helidon.service.registry;
     requires java.naming;
     requires java.transaction;
