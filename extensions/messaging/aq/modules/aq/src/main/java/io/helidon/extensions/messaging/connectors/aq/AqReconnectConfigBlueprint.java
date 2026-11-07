@@ -21,6 +21,7 @@ import java.time.Duration;
 import io.helidon.builder.api.Option;
 import io.helidon.builder.api.Prototype;
 import io.helidon.common.Api;
+import io.helidon.faulttolerance.Retry;
 
 /**
  * Connection recovery policy. Recovery replaces provider resources without replaying failed sends.
@@ -29,6 +30,7 @@ import io.helidon.common.Api;
 @Prototype.Blueprint(decorator = AqReconnectSupport.BuilderDecorator.class)
 @Prototype.Sealed
 @Prototype.Configured
+@Prototype.CustomMethods(AqReconnectSupport.class)
 interface AqReconnectConfigBlueprint {
     /**
      * Reconnect established channels after recoverable provider connection failures.
@@ -40,31 +42,22 @@ interface AqReconnectConfigBlueprint {
     boolean enabled();
 
     /**
-     * Initial recovery delay, doubled after each failed attempt.
+     * Fault tolerance retry for connection recovery. The first recovery attempt starts immediately after cleanup.
+     * By default, recovery allows {@link Integer#MAX_VALUE} attempts over 365 days, with a 100 millisecond delay,
+     * a delay factor of two, twenty percent jitter, and a maximum delay of 30 seconds.
+     * Exhausting the attempts or overall timeout fails the channel. Failed sends are never replayed.
+     * Configuration-file values override these AQ defaults. Supplying a retry or using the retry builder consumer
+     * replaces the policy; the consumer starts with standard fault tolerance defaults of three calls and a
+     * one-second overall timeout. Set the desired recovery limits explicitly when using that builder, or initialize
+     * it from this retry's {@link io.helidon.faulttolerance.Retry#prototype()} before changing individual settings.
      *
-     * @return initial delay
+     * @return recovery retry
      */
-    @Option.Configured
-    @Option.Default("PT0.1S")
-    Duration initialDelay();
-
-    /**
-     * Maximum recovery delay, including jitter.
-     *
-     * @return maximum delay
-     */
-    @Option.Configured
-    @Option.Default("PT30S")
-    Duration maxDelay();
-
-    /**
-     * Fraction by which each recovery delay may vary, between zero and one.
-     *
-     * @return random delay variation
-     */
-    @Option.Configured
-    @Option.DefaultDouble(0.2)
-    double jitter();
+    @Option.Configured(metadata = false)
+    @Prototype.Annotated("io.helidon.config.metadata.ConfiguredOption(key = \"retry\", "
+            + "type = class::io.helidon.faulttolerance.Retry)")
+    @Option.DefaultMethod(type = AqReconnectSupport.class, value = "defaultRetry")
+    Retry retry();
 
     /**
      * Maximum wait for one initial or recovery connection attempt.

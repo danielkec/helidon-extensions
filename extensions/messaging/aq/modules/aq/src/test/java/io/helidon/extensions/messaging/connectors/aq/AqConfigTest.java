@@ -284,9 +284,12 @@ class AqConfigTest {
     void testReconnectDefaultsAndWholePolicyOverride() {
         AqReconnectConfig defaults = AqRuntimeConfig.incoming(defaults(), incoming()).reconnect();
         assertThat(defaults.enabled(), is(true));
-        assertThat(defaults.initialDelay(), is(Duration.ofMillis(100)));
-        assertThat(defaults.maxDelay(), is(Duration.ofSeconds(30)));
-        assertThat(defaults.jitter(), is(0.2));
+        assertThat(defaults.retry().prototype().delay(), is(Duration.ofMillis(100)));
+        assertThat(defaults.retry().prototype().maxDelay(), is(Optional.of(Duration.ofSeconds(30))));
+        assertThat(defaults.retry().prototype().jitterFactor(), is(0.2));
+        assertThat(defaults.retry().prototype().delayFactor(), is(2.0));
+        assertThat(defaults.retry().prototype().calls(), is(Integer.MAX_VALUE));
+        assertThat(defaults.retry().prototype().overallTimeout(), is(Duration.ofDays(365)));
         assertThat(defaults.connectTimeout(), is(Duration.ofSeconds(10)));
         assertThat(defaults.waitTimeout(), is(Duration.ofSeconds(30)));
 
@@ -304,33 +307,62 @@ class AqConfigTest {
         Config config = Config.just(ConfigSources.create(Map.of(
                 "destination", "ORDERS",
                 "reconnect.enabled", "false",
-                "reconnect.initial-delay", "PT0.2S",
-                "reconnect.max-delay", "PT2S",
-                "reconnect.jitter", "0.5",
+                "reconnect.retry.delay", "PT0.2S",
+                "reconnect.retry.max-delay", "PT2S",
+                "reconnect.retry.jitter-factor", "0.5",
+                "reconnect.retry.calls", "10",
+                "reconnect.retry.overall-timeout", "PT1H",
                 "reconnect.connect-timeout", "PT4S",
                 "reconnect.wait-timeout", "PT3S")));
         AqReconnectConfig policy = AqRuntimeConfig.incoming(AqConnectorConfig.builder()
                 .name("aq").config(config).buildPrototype(), incoming()).reconnect();
         assertThat(policy.enabled(), is(false));
-        assertThat(policy.initialDelay(), is(Duration.ofMillis(200)));
-        assertThat(policy.maxDelay(), is(Duration.ofSeconds(2)));
-        assertThat(policy.jitter(), is(0.5));
+        assertThat(policy.retry().prototype().delay(), is(Duration.ofMillis(200)));
+        assertThat(policy.retry().prototype().maxDelay(), is(Optional.of(Duration.ofSeconds(2))));
+        assertThat(policy.retry().prototype().jitterFactor(), is(0.5));
+        assertThat(policy.retry().prototype().delayFactor(), is(2.0));
+        assertThat(policy.retry().prototype().calls(), is(10));
+        assertThat(policy.retry().prototype().overallTimeout(), is(Duration.ofHours(1)));
         assertThat(policy.connectTimeout(), is(Duration.ofSeconds(4)));
         assertThat(policy.waitTimeout(), is(Duration.ofSeconds(3)));
     }
 
     @Test
     void testReconnectRejectsInvalidDurationsAndJitter() {
-        assertThrows(IllegalArgumentException.class, () -> AqReconnectConfig.builder().initialDelay(Duration.ZERO).build());
         assertThrows(IllegalArgumentException.class,
-                     () -> AqReconnectConfig.builder().maxDelay(Duration.ofMillis(1)).build());
+                     () -> AqReconnectConfig.builder().retry(retry -> retry.delay(Duration.ofMillis(-1))).build());
         assertThrows(IllegalArgumentException.class,
                      () -> AqReconnectConfig.builder().connectTimeout(Duration.ofNanos(1)).build());
         assertThrows(IllegalArgumentException.class,
                      () -> AqReconnectConfig.builder().waitTimeout(Duration.ofSeconds(-1)).build());
-        for (double jitter : List.of(-0.1, 1.1, Double.NaN, Double.POSITIVE_INFINITY)) {
-            assertThrows(IllegalArgumentException.class, () -> AqReconnectConfig.builder().jitter(jitter).build());
+        for (double jitter : List.of(-0.1, 1.0, 1.1, Double.NaN, Double.POSITIVE_INFINITY)) {
+            assertThrows(IllegalArgumentException.class,
+                         () -> AqReconnectConfig.builder().retry(retry -> retry.jitterFactor(jitter)).build());
         }
+    }
+
+    @Test
+    void testPartialRetryConfigurationPreservesAqDefaults() {
+        AqReconnectConfig configured = AqReconnectConfig.create(Config.just(ConfigSources.create(Map.of("retry.calls", "7"))));
+        AqReconnectConfig programmatic = AqReconnectConfig.builder()
+                .retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype()).calls(7)).build();
+        for (AqReconnectConfig policy : List.of(configured, programmatic)) {
+            assertThat(policy.retry().prototype().calls(), is(7));
+            assertThat(policy.retry().prototype().overallTimeout(), is(Duration.ofDays(365)));
+            assertThat(policy.retry().prototype().delay(), is(Duration.ofMillis(100)));
+            assertThat(policy.retry().prototype().delayFactor(), is(2.0));
+            assertThat(policy.retry().prototype().jitterFactor(), is(0.2));
+            assertThat(policy.retry().prototype().maxDelay(), is(Optional.of(Duration.ofSeconds(30))));
+        }
+    }
+
+    @Test
+    void testRetryConsumerReplacesPolicyWithFaultToleranceDefaults() {
+        AqReconnectConfig policy = AqReconnectConfig.builder().retry(retry -> retry.calls(7)).build();
+        assertThat(policy.retry().prototype().calls(), is(7));
+        assertThat(policy.retry().prototype().overallTimeout(), is(Duration.ofSeconds(1)));
+        assertThat(policy.retry().prototype().delay(), is(Duration.ofMillis(200)));
+        assertThat(policy.retry().prototype().maxDelay(), is(Optional.empty()));
     }
 
     private static AqConnectorConfig defaults() {

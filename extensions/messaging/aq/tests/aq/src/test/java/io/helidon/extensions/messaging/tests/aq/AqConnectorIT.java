@@ -58,6 +58,7 @@ import io.helidon.extensions.messaging.connectors.aq.AqOutgoingConfig;
 import io.helidon.extensions.messaging.connectors.aq.AqPayloadConverter;
 import io.helidon.extensions.messaging.connectors.aq.AqPayloadType;
 import io.helidon.extensions.messaging.connectors.aq.AqRecipient;
+import io.helidon.extensions.messaging.connectors.aq.AqReconnectConfig;
 import io.helidon.extensions.messaging.connectors.aq.AqXml;
 import io.helidon.messaging.BatchDeliveryException;
 import io.helidon.messaging.BatchItemStatus;
@@ -208,8 +209,10 @@ class AqConnectorIT {
             registration.rebind("jms/Orders", original);
             AqConnector connector = AqConnector.builder().name("jndi-aq").dataSource(database.dataSource())
                     .jndi(registration.config("jms/Orders"))
-                    .reconnect(reconnect -> reconnect.initialDelay(Duration.ofMillis(10)).maxDelay(Duration.ofMillis(50))
-                            .jitter(0).connectTimeout(Duration.ofSeconds(5)).waitTimeout(Duration.ofSeconds(10)))
+                    .reconnect(reconnect -> reconnect.retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype())
+                            .delay(Duration.ofMillis(10))
+                            .maxDelay(Duration.ofMillis(50)).jitterFactor(0))
+                            .connectTimeout(Duration.ofSeconds(5)).waitTimeout(Duration.ofSeconds(10)))
                     .build();
             try (var outgoing = connector.outgoing(AqOutgoingConfig.builder()
                     .connector("jndi-aq").channelName("outgoing").build())) {
@@ -1162,8 +1165,10 @@ class AqConnectorIT {
     private AqConnector reconnectConnector(String destination) {
         return AqConnector.builder().name("reconnect-aq").dataSource(database.dataSource())
                 .schema(database.schema()).destination(destination).receiveTimeout(Duration.ofSeconds(30))
-                .reconnect(reconnect -> reconnect.initialDelay(Duration.ofMillis(50)).maxDelay(Duration.ofMillis(100))
-                        .jitter(0).connectTimeout(Duration.ofSeconds(5)).waitTimeout(Duration.ofSeconds(10)))
+                .reconnect(reconnect -> reconnect.retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype())
+                        .delay(Duration.ofMillis(50))
+                        .maxDelay(Duration.ofMillis(100)).jitterFactor(0))
+                        .connectTimeout(Duration.ofSeconds(5)).waitTimeout(Duration.ofSeconds(10)))
                 .build();
     }
 

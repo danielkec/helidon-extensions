@@ -18,9 +18,11 @@ package io.helidon.extensions.messaging.connectors.aq;
 
 import java.sql.SQLRecoverableException;
 import java.time.Duration;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 
 import javax.jms.Connection;
 import javax.jms.ConnectionFactory;
@@ -107,20 +109,37 @@ class AqResourceManagerTest {
     void testStopRecoveryCancelsBackoffAndWakesWaiters() throws Exception {
         ConnectionFactory factory = mock(ConnectionFactory.class);
         Connection connection = connection();
-        when(factory.createConnection()).thenReturn(connection);
+        when(factory.createConnection()).thenReturn(connection).thenThrow(disconnected());
+        CountDownLatch retryScheduled = new CountDownLatch(1);
         AqReconnectConfig policy = AqReconnectConfig.builder(policy())
-                .initialDelay(Duration.ofSeconds(30)).maxDelay(Duration.ofSeconds(30)).build();
+                .retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype()).retryPolicy((_, _, _) -> {
+                    retryScheduled.countDown();
+                    return Optional.of(30_000L);
+                }))
+                .build();
         try (AqResourceManager manager = manager(factory, policy)) {
             manager.open();
             assertThat(manager.reconnect(manager.awaitReady(), disconnected()), is(true));
+            assertThat(retryScheduled.await(2, TimeUnit.SECONDS), is(true));
             FutureTask<AqResources> awaiting = new FutureTask<>(manager::awaitReady);
             Thread waiter = Thread.ofVirtual().start(awaiting);
-            manager.stopRecovery();
-            assertThat(awaiting.get(1, TimeUnit.SECONDS), nullValue());
-            waiter.join(Duration.ofSeconds(1));
-            assertThat(waiter.isAlive(), is(false));
-            assertThrows(MessagingException.class, () -> manager.awaitReady(Duration.ofSeconds(1)));
-            verify(factory, times(1)).createConnection();
+            try {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+                Thread.State state;
+                while ((state = waiter.getState()) != Thread.State.WAITING
+                        && state != Thread.State.TERMINATED && System.nanoTime() < deadline) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                }
+                assertThat("Waiter must enter the recovery wait before stopping", state, is(Thread.State.WAITING));
+                manager.stopRecovery();
+                assertThat(awaiting.get(1, TimeUnit.SECONDS), nullValue());
+                assertThrows(MessagingException.class, () -> manager.awaitReady(Duration.ofSeconds(1)));
+                verify(factory, times(2)).createConnection();
+            } finally {
+                manager.stopRecovery();
+                waiter.join(Duration.ofSeconds(1));
+                assertThat(waiter.isAlive(), is(false));
+            }
         }
     }
 
@@ -276,8 +295,9 @@ class AqResourceManagerTest {
     }
 
     private static AqReconnectConfig policy() {
-        return AqReconnectConfig.builder().initialDelay(Duration.ofMillis(10)).maxDelay(Duration.ofMillis(20))
-                .jitter(0).connectTimeout(Duration.ofSeconds(2)).build();
+        return AqReconnectConfig.builder().retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype())
+                .delay(Duration.ofMillis(10))
+                .maxDelay(Duration.ofMillis(20)).jitterFactor(0)).connectTimeout(Duration.ofSeconds(2)).build();
     }
 
     private static Connection connection() throws JMSException {

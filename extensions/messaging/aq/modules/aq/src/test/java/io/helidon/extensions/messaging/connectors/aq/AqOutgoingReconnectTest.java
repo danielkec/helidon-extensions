@@ -21,6 +21,7 @@ import java.sql.SQLRecoverableException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -31,11 +32,14 @@ import java.util.concurrent.locks.LockSupport;
 import javax.jms.Connection;
 import javax.jms.ConnectionFactory;
 import javax.jms.JMSException;
+import javax.jms.JMSSecurityException;
 import javax.jms.MessageProducer;
 import javax.jms.Queue;
 import javax.jms.Session;
 import javax.jms.TextMessage;
 
+import io.helidon.faulttolerance.RetryException;
+import io.helidon.faulttolerance.RetryOutcome;
 import io.helidon.messaging.BatchDeliveryException;
 import io.helidon.messaging.BatchItemStatus;
 import io.helidon.messaging.Message;
@@ -50,6 +54,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -444,16 +449,24 @@ class AqOutgoingReconnectTest {
         Client replacement = client(false);
         ConnectionFactory factory = factory(original, replacement);
         doThrow(connectionFailure()).when(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+        when(factory.createConnection()).thenReturn(original.connection()).thenThrow(connectionFailure());
+        CountDownLatch retryScheduled = new CountDownLatch(1);
+        AqReconnectConfig policy = reconnect()
+                .retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype()).retryPolicy((_, _, _) -> {
+                    retryScheduled.countDown();
+                    return Optional.of(60_000L);
+                }))
+                .waitTimeout(Duration.ofSeconds(30))
+                .build();
         AqOutgoingChannel channel = channel(config(factory, false)
-                                                    .reconnect(reconnect().initialDelay(Duration.ofMinutes(1))
-                                                                       .maxDelay(Duration.ofMinutes(1))
-                                                                       .waitTimeout(Duration.ofSeconds(30)).build())
+                                                    .reconnect(policy)
                                                     .buildPrototype());
         channel.start();
         List<FutureTask<BatchDeliveryException>> sends = new ArrayList<>();
         List<Thread> senders = new ArrayList<>();
         try {
             assertThrows(BatchDeliveryException.class, () -> channel.sendBatch(batch("first")));
+            assertThat(retryScheduled.await(2, TimeUnit.SECONDS), is(true));
             for (int i = 0; i < 4; i++) {
                 MessageBatch<String> pending = batch("pending-" + i);
                 FutureTask<BatchDeliveryException> send = new FutureTask<>(() -> {
@@ -482,7 +495,7 @@ class AqOutgoingReconnectTest {
                 assertThat(failure.getCause().getMessage(), is("AQ channel recovery has stopped"));
                 assertThat(failure.outcome(0).status(), is(BatchItemStatus.NOT_ATTEMPTED));
             }
-            verify(factory, times(1)).createConnection();
+            verify(factory, times(2)).createConnection();
             verify(original.connection()).close();
             assertThrows(MessagingException.class, () -> channel.sendBatch(batch("after-close")));
         } finally {
@@ -491,6 +504,87 @@ class AqOutgoingReconnectTest {
                 sender.join(Duration.ofSeconds(2));
                 assertThat(sender.isAlive(), is(false));
             }
+            channel.close();
+        }
+    }
+
+    @Test
+    void exhaustedRetriesStopRecoveryWithoutReplayingSends() throws Exception {
+        Client original = client(false);
+        ConnectionFactory factory = mock(ConnectionFactory.class);
+        when(factory.createConnection()).thenReturn(original.connection()).thenThrow(connectionFailure());
+        doThrow(connectionFailure()).when(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+        AqOutgoingChannel channel = channel(config(factory, false)
+                .reconnect(reconnect().retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype())
+                        .calls(2).delay(Duration.ZERO)).build())
+                .buildPrototype());
+        channel.start();
+        try {
+            BatchDeliveryException originalFailure = assertThrows(BatchDeliveryException.class,
+                                                                  () -> channel.sendBatch(batch("first")));
+            assertThat(originalFailure.outcome(0).status(), is(BatchItemStatus.INDETERMINATE));
+            BatchDeliveryException unavailable = assertUnavailableBatch(channel);
+            assertThat(unavailable.getCause().getCause(), instanceOf(RetryException.class));
+            assertThat(((RetryException) unavailable.getCause().getCause()).termination(),
+                       is(RetryOutcome.Termination.RETRIES_EXHAUSTED));
+            assertUnavailableBatch(channel);
+
+            verify(factory, times(3)).createConnection();
+            verify(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+            verify(original.session()).createTextMessage("first");
+            verify(original.session(), never()).createTextMessage("next");
+            verify(original.connection()).close();
+        } finally {
+            channel.close();
+        }
+    }
+
+    @Test
+    void overallTimeoutStopsRecoveryBeforeNextRetry() throws Exception {
+        Client original = client(false);
+        ConnectionFactory factory = mock(ConnectionFactory.class);
+        when(factory.createConnection()).thenReturn(original.connection()).thenThrow(connectionFailure());
+        doThrow(connectionFailure()).when(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+        AqOutgoingChannel channel = channel(config(factory, false)
+                .reconnect(reconnect().retry(retry -> retry.calls(10)
+                        .delay(Duration.ofSeconds(30))
+                        .maxDelay(Duration.ofSeconds(30))
+                        .overallTimeout(Duration.ofMillis(100))).build())
+                .buildPrototype());
+        channel.start();
+        try {
+            assertThrows(BatchDeliveryException.class, () -> channel.sendBatch(batch("first")));
+            BatchDeliveryException unavailable = assertUnavailableBatch(channel);
+            assertThat(unavailable.getCause().getCause(), instanceOf(RetryException.class));
+            assertThat(((RetryException) unavailable.getCause().getCause()).termination(),
+                       is(RetryOutcome.Termination.TIMED_OUT));
+            assertUnavailableBatch(channel);
+
+            verify(factory, times(2)).createConnection();
+            verify(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+            verify(original.session(), never()).createTextMessage("next");
+            verify(original.connection()).close();
+        } finally {
+            channel.close();
+        }
+    }
+
+    @Test
+    void permanentConnectionFailureStopsRecoveryBeforeRetryBudgetIsExhausted() throws Exception {
+        Client original = client(false);
+        ConnectionFactory factory = mock(ConnectionFactory.class);
+        when(factory.createConnection()).thenReturn(original.connection()).thenThrow(new JMSSecurityException("invalid credentials"));
+        doThrow(connectionFailure()).when(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+        AqOutgoingChannel channel = channel(config(factory, false).buildPrototype());
+        channel.start();
+        try {
+            assertThrows(BatchDeliveryException.class, () -> channel.sendBatch(batch("first")));
+            assertUnavailableBatch(channel);
+
+            verify(factory, times(2)).createConnection();
+            verify(original.producer()).send(any(javax.jms.Message.class), eq(2), eq(4), eq(0L));
+            verify(original.connection()).close();
+        } finally {
             channel.close();
         }
     }
@@ -611,8 +705,10 @@ class AqOutgoingReconnectTest {
     }
 
     private static AqReconnectConfig.Builder reconnect() {
-        return AqReconnectConfig.builder().initialDelay(Duration.ofMillis(1)).maxDelay(Duration.ofMillis(2))
-                .jitter(0).waitTimeout(Duration.ofSeconds(2)).connectTimeout(Duration.ofSeconds(5));
+        return AqReconnectConfig.builder()
+                .retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype())
+                        .delay(Duration.ofMillis(1)).maxDelay(Duration.ofMillis(2)).jitterFactor(0))
+                .waitTimeout(Duration.ofSeconds(2)).connectTimeout(Duration.ofSeconds(5));
     }
 
     private static AqOutgoingChannel channel(AqConnectorConfig connector) {
@@ -624,6 +720,15 @@ class AqOutgoingReconnectTest {
 
     private static MessageBatch<String> batch(String... values) {
         return MessageBatch.create(List.of(values).stream().map(Message::create).toList());
+    }
+
+    private static BatchDeliveryException assertUnavailableBatch(AqOutgoingChannel channel) {
+        BatchDeliveryException failure = assertThrows(BatchDeliveryException.class,
+                                                    () -> channel.sendBatch(batch("next", "tail")));
+        assertThat(failure.getCause().getMessage(), is("AQ channel connection is unavailable"));
+        assertThat(failure.outcome(0).status(), is(BatchItemStatus.NOT_ATTEMPTED));
+        assertThat(failure.outcome(1).status(), is(BatchItemStatus.NOT_ATTEMPTED));
+        return failure;
     }
 
     private record Client(Connection connection, Session session, MessageProducer producer) {

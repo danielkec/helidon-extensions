@@ -443,7 +443,10 @@ acknowledgment could not be confirmed, the old session is abandoned and Oracle d
 message. Processing can therefore occur more than once. Durable subscriptions retain their existing identity;
 non-durable topic subscriptions cannot recover messages published while they were disconnected.
 
-Recovery uses exponential backoff with jitter and continues until shutdown or a non-recoverable error. Invalid
+Recovery uses Helidon Fault Tolerance `Retry` with exponential backoff and jitter. The first recovery attempt starts
+immediately after the failed connection is cleaned up. By default, each recovery sequence allows up to 2,147,483,647
+attempts over 365 days. Exhausting either limit fails the channel. The overall timeout is checked between failed
+attempts and retry waits; it does not interrupt provider initialization or cleanup already in progress. Invalid
 credentials, destination/configuration errors and application processing or payload conversion failures retain their
 normal error handling. Set `reconnect.enabled: false` to disable automatic recovery. Draining or closing a channel
 cancels recovery and prevents another connection attempt.
@@ -456,9 +459,13 @@ messaging:
       data-source-name: orders
       reconnect:
         enabled: true
-        initial-delay: PT0.1S
-        max-delay: PT30S
-        jitter: 0.2
+        retry:
+          calls: 2147483647
+          overall-timeout: P365D
+          delay: PT0.1S
+          delay-factor: 2
+          max-delay: PT30S
+          jitter-factor: 0.2
         connect-timeout: PT10S
         wait-timeout: PT30S
 ```
@@ -468,6 +475,25 @@ overridden as a whole on a channel. `connect-timeout` bounds waiting for resourc
 waiting for a recovered connection, not an in-progress database send. Configure JDBC connection/read timeouts on the
 supplied data source or factory as appropriate. If a provider ignores cancellation, recovery waits for that attempt's
 cleanup before opening another connection, and closes any late resource returned after shutdown.
+
+Values configured under `reconnect.retry` override the AQ defaults above. Supplying a `Retry` or `RetryConfig`
+programmatically replaces the retry policy. The generated `.retry(retry -> ...)` consumer starts with standard
+Helidon FT defaults (three calls and a one-second overall timeout), so set the desired recovery limits explicitly
+when using that builder. For example, to use the AQ default recovery policy:
+
+```java
+AqReconnectConfig recovery = AqReconnectConfig.builder()
+        .retry(retry -> retry.calls(Integer.MAX_VALUE)
+                .overallTimeout(Duration.ofDays(365))
+                .delay(Duration.ofMillis(100))
+                .delayFactor(2)
+                .jitterFactor(0.2)
+                .maxDelay(Duration.ofSeconds(30)))
+        .build();
+```
+
+Omitting `.retry(...)` uses AQ's default policy automatically. Alternatively, initialize the retry builder with
+`.from(AqReconnectConfig.create().retry().prototype())` before overriding individual settings.
 
 ## Configuration reference
 
@@ -500,9 +526,12 @@ Service Registry data source, then an unqualified connection factory. Credential
 | `jndi.destination` | Common | Required nonblank lookup name within a configured `jndi` block |
 | `jndi.env-properties` | Common | Empty map; naming-provider defaults still apply. Keys must be nonblank and values non-null; values are omitted from configuration string representations |
 | `reconnect.enabled` | Common | `true`; recover established channels after recognized connection failures. Initial startup still makes one attempt |
-| `reconnect.initial-delay` | Common | `PT0.1S`; at least one millisecond before recovery, doubled after failed attempts |
-| `reconnect.max-delay` | Common | `PT30S`; positive maximum backoff including jitter, at least `reconnect.initial-delay` |
-| `reconnect.jitter` | Common | `0.2`; finite backoff variation fraction in the range `0` through `1` |
+| `reconnect.retry.calls` | Common | `2147483647`; positive maximum number of recovery attempts, including the first |
+| `reconnect.retry.overall-timeout` | Common | `P365D`; positive time budget for the retry sequence, checked between failed attempts and retry waits |
+| `reconnect.retry.delay` | Common | `PT0.1S`; non-negative base delay between recovery attempts |
+| `reconnect.retry.delay-factor` | Common | `2`; exponential delay multiplier |
+| `reconnect.retry.max-delay` | Common | `PT30S`; non-negative maximum delay including jitter |
+| `reconnect.retry.jitter-factor` | Common | `0.2`; relative backoff variation from `0` inclusive to `1` exclusive; `-1` disables it |
 | `reconnect.connect-timeout` | Common | `PT10S`; maximum wait for initial or recovery resource initialization, at least one millisecond |
 | `reconnect.wait-timeout` | Outgoing | `PT30S`; maximum wait for a recovered connection per send call, at least one millisecond; does not time an in-progress native send |
 

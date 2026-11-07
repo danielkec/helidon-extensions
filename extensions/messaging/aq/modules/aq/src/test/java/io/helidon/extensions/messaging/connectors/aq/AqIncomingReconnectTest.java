@@ -32,6 +32,8 @@ import javax.jms.Queue;
 import javax.jms.Session;
 import javax.jms.TextMessage;
 
+import io.helidon.faulttolerance.RetryException;
+import io.helidon.faulttolerance.RetryOutcome;
 import io.helidon.messaging.ConnectorDelivery;
 import io.helidon.messaging.ConnectorDeliveryReservation;
 import io.helidon.messaging.IncomingConnectorContext;
@@ -42,6 +44,7 @@ import io.helidon.service.registry.ServiceRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -52,6 +55,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -339,19 +343,17 @@ class AqIncomingReconnectTest {
     }
 
     @Test
-    void testDrainCancelsBackoffWithoutOpeningReplacement() throws Exception {
+    void testDrainCancelsBackoffWithoutAnotherConnectionAttempt() throws Exception {
         Client first = client(true);
         ConnectionFactory factory = factory(first, client(true));
-        CountDownLatch oldConnectionClosed = new CountDownLatch(1);
-        doAnswer(_ -> {
-            oldConnectionClosed.countDown();
-            return null;
-        }).when(first.connection()).close();
+        when(factory.createConnection()).thenReturn(first.connection()).thenThrow(disconnected());
+        CountDownLatch retryScheduled = new CountDownLatch(1);
         when(first.consumer().receive(100)).thenThrow(disconnected());
         AqIncomingChannel channel = channel(factory, true, AqReconnectConfig.builder()
-                .initialDelay(Duration.ofSeconds(30))
-                .maxDelay(Duration.ofSeconds(30))
-                .jitter(0)
+                .retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype()).retryPolicy((_, _, _) -> {
+                    retryScheduled.countDown();
+                    return Optional.of(30_000L);
+                }))
                 .build());
         FutureTask<Void> run = new FutureTask<>(() -> {
             channel.run(context(reservation(mock(ConnectorDelivery.class))));
@@ -359,7 +361,7 @@ class AqIncomingReconnectTest {
         });
         Thread runner = Thread.ofVirtual().start(run);
         try {
-            assertThat(oldConnectionClosed.await(2, TimeUnit.SECONDS), is(true));
+            assertThat(retryScheduled.await(2, TimeUnit.SECONDS), is(true));
             channel.drain();
             run.get(500, TimeUnit.MILLISECONDS);
         } finally {
@@ -369,8 +371,33 @@ class AqIncomingReconnectTest {
         }
 
         assertThat(runner.isAlive(), is(false));
-        verify(factory).createConnection();
+        verify(factory, times(2)).createConnection();
+        verify(first.connection()).close();
         verify(first.session(), never()).commit();
+    }
+
+    @Test
+    void testExhaustedRecoveryStopsIncomingChannel() throws Exception {
+        Client first = client(true);
+        ConnectionFactory factory = factory(first, client(true));
+        when(factory.createConnection()).thenReturn(first.connection()).thenThrow(disconnected());
+        when(first.consumer().receive(100)).thenThrow(disconnected());
+        ConnectorDeliveryReservation reservation = reservation(mock(ConnectorDelivery.class));
+        AqIncomingChannel channel = channel(factory, true, AqReconnectConfig.builder()
+                .retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype())
+                        .calls(2).delay(Duration.ZERO).jitterFactor(0))
+                .build());
+        try {
+            MessagingException failure = assertThrows(MessagingException.class, () -> channel.run(context(reservation)));
+            assertThat(failure.getCause(), instanceOf(RetryException.class));
+            assertThat(((RetryException) failure.getCause()).termination(), is(RetryOutcome.Termination.RETRIES_EXHAUSTED));
+            verify(factory, times(3)).createConnection();
+            verify(reservation, never()).start(any(MessageBatch.class));
+            verify(reservation).close();
+            verify(first.connection()).close();
+        } finally {
+            channel.close();
+        }
     }
 
     private static Client client(boolean transacted) throws Exception {
@@ -437,9 +464,8 @@ class AqIncomingReconnectTest {
 
     private static AqReconnectConfig policy() {
         return AqReconnectConfig.builder()
-                .initialDelay(Duration.ofMillis(1))
-                .maxDelay(Duration.ofMillis(1))
-                .jitter(0)
+                .retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype())
+                        .delay(Duration.ofMillis(1)).maxDelay(Duration.ofMillis(1)).jitterFactor(0))
                 .build();
     }
 

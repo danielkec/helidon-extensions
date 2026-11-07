@@ -20,7 +20,6 @@ import java.time.Duration;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
@@ -200,52 +199,67 @@ final class AqResourceManager implements AutoCloseable {
     }
 
     private void recover() {
-        long delay = config.reconnect().initialDelay().toMillis();
-        long maximum = config.reconnect().maxDelay().toMillis();
         try {
-            while (cleanupRetired() && pause(delay)) {
-                AqResources resources = nextAttempt();
-                if (resources == null) {
-                    return;
-                }
-                try {
-                    resources.open(incoming);
-                    if (publish(resources)) {
-                        LOGGER.log(System.Logger.Level.INFO, "AQ channel {0} reconnected", config.channelName());
-                        return;
-                    }
-                    resources.forceClose();
-                    return;
-                } catch (Throwable e) {
-                    resources.forceClose();
-                    recordFailure(e, !AqReconnectSupport.recoverable(e));
-                    lock.lock();
-                    try {
-                        retiring = resources;
-                        opening = null;
-                        if (terminal) {
-                            LOGGER.log(System.Logger.Level.ERROR,
-                                       "AQ channel {0} connection recovery stopped after a nonrecoverable failure",
-                                       config.channelName());
-                            return;
-                        }
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-                delay = delay >= maximum / 2 ? maximum : Math.min(maximum, delay * 2);
-            }
-        } catch (MessagingException e) {
+            config.reconnect().retry().invoke(_ -> recoverAttempt());
+        } catch (RuntimeException e) {
             lock.lock();
             try {
                 if (!stopped && !closed) {
                     failure = e;
                     terminal = true;
                     changed.signalAll();
+                    LOGGER.log(System.Logger.Level.ERROR,
+                               "AQ channel " + config.channelName() + " connection recovery stopped", e);
                 }
             } finally {
                 lock.unlock();
             }
+        }
+    }
+
+    private boolean recoverAttempt() {
+        try {
+            if (!cleanupRetired()) {
+                return false;
+            }
+        } catch (MessagingException e) {
+            recordFailure(e, true);
+            return false;
+        }
+        AqResources resources = nextAttempt();
+        if (resources == null) {
+            return false;
+        }
+        try {
+            resources.open(incoming);
+            if (publish(resources)) {
+                LOGGER.log(System.Logger.Level.INFO, "AQ channel {0} reconnected", config.channelName());
+                return true;
+            }
+            resources.forceClose();
+            return false;
+        } catch (Throwable e) {
+            resources.forceClose();
+            boolean recoverable = AqReconnectSupport.recoverable(e);
+            lock.lock();
+            try {
+                retiring = resources;
+                opening = null;
+                failure = e;
+                terminal = !recoverable;
+                changed.signalAll();
+                if (stopped || closed || terminal) {
+                    if (terminal && !stopped && !closed) {
+                        LOGGER.log(System.Logger.Level.ERROR,
+                                   "AQ channel " + config.channelName()
+                                           + " connection recovery stopped after a nonrecoverable failure", e);
+                    }
+                    return false;
+                }
+            } finally {
+                lock.unlock();
+            }
+            throw new MessagingException("AQ connection recovery attempt failed", e);
         }
     }
 
@@ -271,27 +285,6 @@ final class AqResourceManager implements AutoCloseable {
             }
             retiring = null;
             return true;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private boolean pause(long delay) {
-        double jitter = config.reconnect().jitter();
-        long millis = jitter == 0
-                ? delay
-                : (long) (delay * ThreadLocalRandom.current().nextDouble(1 - jitter, 1 + jitter));
-        long boundedMillis = Math.max(1, Math.min(millis, config.reconnect().maxDelay().toMillis()));
-        long remaining = TimeUnit.MILLISECONDS.toNanos(boundedMillis);
-        lock.lock();
-        try {
-            while (!stopped && !closed && remaining > 0) {
-                remaining = changed.awaitNanos(remaining);
-            }
-            return !stopped && !closed;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
         } finally {
             lock.unlock();
         }

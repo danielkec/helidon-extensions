@@ -41,11 +41,23 @@ import javax.naming.OperationNotSupportedException;
 import javax.naming.ServiceUnavailableException;
 
 import io.helidon.builder.api.Prototype;
+import io.helidon.config.Config;
+import io.helidon.faulttolerance.Retry;
+import io.helidon.faulttolerance.RetryConfig;
 
 import oracle.AQ.AQException;
 
 final class AqReconnectSupport {
     private AqReconnectSupport() {
+    }
+
+    static Retry defaultRetry() {
+        return defaultRetryBuilder().build();
+    }
+
+    @Prototype.ConfigFactoryMethod("retry")
+    static Retry retry(Config config) {
+        return defaultRetryBuilder().config(config).build();
     }
 
     static boolean recoverable(Throwable failure) {
@@ -105,6 +117,16 @@ final class AqReconnectSupport {
         return connectionFailure;
     }
 
+    private static RetryConfig.Builder defaultRetryBuilder() {
+        return Retry.builder()
+                .calls(Integer.MAX_VALUE)
+                .overallTimeout(Duration.ofDays(365))
+                .delay(Duration.ofMillis(100))
+                .delayFactor(2)
+                .jitterFactor(0.2)
+                .maxDelay(Duration.ofSeconds(30));
+    }
+
     private static boolean permanentError(int code) {
         return switch (code) {
         // Invalid credentials, locked/expired accounts, authentication protocol, and missing queue.
@@ -136,16 +158,8 @@ final class AqReconnectSupport {
     static final class BuilderDecorator implements Prototype.BuilderDecorator<AqReconnectConfig.BuilderBase<?, ?>> {
         @Override
         public void decorate(AqReconnectConfig.BuilderBase<?, ?> builder) {
-            positiveMillis("reconnect.initial-delay", builder.initialDelay());
-            positiveMillis("reconnect.max-delay", builder.maxDelay());
             positiveMillis("reconnect.connect-timeout", builder.connectTimeout());
             positiveMillis("reconnect.wait-timeout", builder.waitTimeout());
-            if (builder.maxDelay().compareTo(builder.initialDelay()) < 0) {
-                throw new IllegalArgumentException("reconnect.max-delay must not be less than initial-delay");
-            }
-            if (!Double.isFinite(builder.jitter()) || builder.jitter() < 0 || builder.jitter() > 1) {
-                throw new IllegalArgumentException("reconnect.jitter must be between zero and one");
-            }
         }
     }
 }

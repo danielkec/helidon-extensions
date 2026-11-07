@@ -333,8 +333,10 @@ class AqTransformationTest {
     private static AqConnectorConfig.Builder config(ConnectionFactory factory) {
         return AqConnectorConfig.builder().name("aq").connectionFactory(factory).destination("ORDERS")
                 .closeTimeout(Duration.ofSeconds(2))
-                .reconnect(reconnect -> reconnect.initialDelay(Duration.ofMillis(1)).maxDelay(Duration.ofMillis(5))
-                        .jitter(0).connectTimeout(Duration.ofSeconds(2)).waitTimeout(Duration.ofSeconds(2)));
+                .reconnect(reconnect -> reconnect.retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype())
+                        .delay(Duration.ofMillis(1))
+                        .maxDelay(Duration.ofMillis(5)).jitterFactor(0))
+                        .connectTimeout(Duration.ofSeconds(2)).waitTimeout(Duration.ofSeconds(2)));
     }
 
     private static AqOutgoingConfig outgoing() {

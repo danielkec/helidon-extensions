@@ -335,8 +335,10 @@ class AqJndiDestinationTest {
     }
 
     private static AqReconnectConfig policy() {
-        return AqReconnectConfig.builder().initialDelay(Duration.ofMillis(1)).maxDelay(Duration.ofMillis(5))
-                .jitter(0).connectTimeout(Duration.ofSeconds(2)).waitTimeout(Duration.ofSeconds(2)).build();
+        return AqReconnectConfig.builder().retry(retry -> retry.from(AqReconnectConfig.create().retry().prototype())
+                .delay(Duration.ofMillis(1))
+                .maxDelay(Duration.ofMillis(5)).jitterFactor(0))
+                .connectTimeout(Duration.ofSeconds(2)).waitTimeout(Duration.ofSeconds(2)).build();
     }
 
     private static JMSException disconnected() {
