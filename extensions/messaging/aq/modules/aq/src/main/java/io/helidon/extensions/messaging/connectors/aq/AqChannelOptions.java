@@ -26,46 +26,54 @@ import io.helidon.builder.api.Option;
 
 /**
  * Shared AQ options. Absent channel options inherit connector configuration.
+ * Exactly one connection source is required after inheritance. A channel connection source replaces the connector's
+ * complete source selection, including direct connection credentials.
  */
 interface AqChannelOptions {
     /**
      * Application-owned data source. The connector closes borrowed connections, never the data source.
+     * Configure authentication on the data source itself.
      *
      * @return shared data source
      */
+    @Option.Confidential
     Optional<DataSource> dataSource();
 
     /**
      * Name of the application-owned data source in the Service Registry.
+     * Configure authentication on the registered data source itself.
      *
      * @return data source name
      */
-    @Option.Configured
+    @Option.Configured("data-source")
     Optional<String> dataSourceName();
 
     /**
      * Oracle AQ connection factory supplied by the application.
+     * Configure authentication on the factory itself.
      *
      * @return connection factory
      */
+    @Option.Confidential
     Optional<ConnectionFactory> connectionFactory();
 
     /**
      * Name of the Oracle AQ connection factory in the Service Registry.
+     * Configure authentication on the registered factory itself.
      *
      * @return connection factory name
      */
-    @Option.Configured
+    @Option.Configured("connection-factory")
     Optional<String> connectionFactoryName();
 
     /**
-     * JDBC connection URL, used when no application resource is configured.
+     * Direct JDBC connection properties. The URL is required when this source is selected.
+     * Mutually exclusive with a supplied or registered data source or connection factory.
      *
-     * @return JDBC URL
+     * @return direct connection properties
      */
     @Option.Configured
-    @Option.Confidential
-    Optional<String> jdbcUrl();
+    Optional<AqConnectionConfig> connection();
 
     /**
      * Name of an existing AQ queue.
@@ -115,23 +123,6 @@ interface AqChannelOptions {
      * @return payload converter
      */
     Optional<AqPayloadConverter> payloadConverter();
-
-    /**
-     * Database connection user name.
-     *
-     * @return user name
-     */
-    @Option.Configured
-    Optional<String> username();
-
-    /**
-     * Database connection password.
-     *
-     * @return password
-     */
-    @Option.Configured
-    @Option.Confidential
-    Optional<String> password();
 
     /**
      * Connection client identifier, when not supplied by the connection factory.

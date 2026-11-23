@@ -17,7 +17,6 @@
 package io.helidon.extensions.messaging.connectors.aq;
 
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Properties;
 import java.util.function.Supplier;
 
@@ -26,9 +25,6 @@ import javax.jms.JMSException;
 import javax.sql.DataSource;
 
 import io.helidon.messaging.MessagingException;
-import io.helidon.service.registry.FactoryType;
-import io.helidon.service.registry.Lookup;
-import io.helidon.service.registry.ServiceInstance;
 import io.helidon.service.registry.ServiceRegistry;
 
 import oracle.jms.AQjmsFactory;
@@ -56,8 +52,8 @@ final class AqResourceResolver {
             if (config.dataSource().isPresent()) {
                 return AQjmsFactory.getConnectionFactory(config.dataSource().orElseThrow());
             }
-            if (config.jdbcUrl().isPresent()) {
-                return AQjmsFactory.getConnectionFactory(config.jdbcUrl().orElseThrow(), new Properties());
+            if (config.connection().isPresent()) {
+                return AQjmsFactory.getConnectionFactory(config.connection().orElseThrow().url(), new Properties());
             }
             ServiceRegistry services = registry.get();
             if (config.connectionFactoryName().isPresent()) {
@@ -71,12 +67,7 @@ final class AqResourceResolver {
                         .orElseThrow(() -> missing(config, "DataSource named " + name));
                 return AQjmsFactory.getConnectionFactory(source);
             }
-            var dataSource = unqualified(services, DataSource.class);
-            if (dataSource.isPresent()) {
-                return AQjmsFactory.getConnectionFactory(dataSource.orElseThrow());
-            }
-            return unqualified(services, ConnectionFactory.class)
-                    .orElseThrow(() -> missing(config, "DataSource or AQ ConnectionFactory"));
+            throw new MessagingException("No AQ connection source is configured for channel " + config.channelName());
         } catch (JMSException e) {
             throw new MessagingException("Cannot resolve AQ connection factory for channel " + config.channelName(), e);
         }
@@ -84,21 +75,5 @@ final class AqResourceResolver {
 
     private static MessagingException missing(AqRuntimeConfig config, String resource) {
         return new MessagingException("No " + resource + " is registered for AQ channel " + config.channelName());
-    }
-
-    private static <T> Optional<T> unqualified(ServiceRegistry registry, Class<T> contract) {
-        Lookup lookup = Lookup.create(contract);
-        return registry.lookupServices(lookup).stream()
-                // These factories may supply instances with qualifiers different from the factory's qualifiers.
-                .filter(service -> service.qualifiers().isEmpty()
-                        || service.factoryType() == FactoryType.SERVICES
-                        || service.factoryType() == FactoryType.INJECTION_POINT)
-                .flatMap(service -> registry.<T>lookupInstances(Lookup.builder(lookup)
-                                .serviceType(service.serviceType())
-                                .build())
-                        .stream())
-                .filter(instance -> instance.qualifiers().isEmpty())
-                .map(ServiceInstance::get)
-                .findFirst();
     }
 }

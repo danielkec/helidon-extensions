@@ -41,9 +41,7 @@ record AqRuntimeConfig(String channelName,
                        Optional<String> dataSourceName,
                        Optional<ConnectionFactory> connectionFactory,
                        Optional<String> connectionFactoryName,
-                       Optional<String> jdbcUrl,
-                       Optional<String> username,
-                       Optional<String> password,
+                       Optional<AqConnectionConfig> connection,
                        Optional<String> clientId,
                        boolean transacted,
                        boolean allowObjectMessages,
@@ -88,6 +86,11 @@ record AqRuntimeConfig(String channelName,
         validateDestination(defaults);
         validateDestination(channel);
         AqChannelOptions resources = resourceCount(channel) > 0 ? channel : defaults;
+        if (resourceCount(resources) == 0) {
+            throw new IllegalArgumentException("AQ connection source is required for channel " + channelName
+                                                       + ": configure connection, data-source, connection-factory, "
+                                                       + "or supply a DataSource or ConnectionFactory");
+        }
         boolean directOverride = channel.destination().isPresent() || channel.schema().isPresent();
         Optional<AqJndiConfig> jndi = directOverride ? Optional.empty() : inherit(channel.jndi(), defaults.jndi());
         Optional<String> directDestination = defaults.jndi().isEmpty()
@@ -96,8 +99,6 @@ record AqRuntimeConfig(String channelName,
                 .orElseThrow(() -> new IllegalArgumentException("AQ destination is required for channel " + channelName));
         Optional<String> schema = jndi.isPresent() ? Optional.empty()
                 : defaults.jndi().isEmpty() ? inherit(channel.schema(), defaults.schema()) : channel.schema();
-        Optional<String> username = inherit(channel.username(), defaults.username());
-        Optional<String> password = inherit(channel.password(), defaults.password());
         Optional<String> clientId = inherit(channel.clientId(), defaults.clientId());
         Optional<String> selector = inherit(incoming.messageSelector(), defaults.messageSelector());
         Optional<String> subscription = incoming.subscriptionName();
@@ -124,14 +125,10 @@ record AqRuntimeConfig(String channelName,
         int priority = inherit(outgoing.priority(), defaults.priority()).orElse(4);
         requireNonBlank("destination", Optional.of(destination));
         requireNonBlank("schema", schema);
-        requireNonBlank("username", username);
         requireNonBlank("client-id", clientId);
         requireNonBlank("message-selector", selector);
         requireNonBlank("subscription-name", subscription);
         requireNonBlank("recipient-name", recipient);
-        if (username.isPresent() != password.isPresent()) {
-            throw new IllegalArgumentException("AQ username and password must be configured together");
-        }
         requireMillis("receive-timeout", receiveTimeout, false);
         requireMillis("close-timeout", closeTimeout, false);
         requireMillis("time-to-live", timeToLive, true);
@@ -174,9 +171,7 @@ record AqRuntimeConfig(String channelName,
                                    resources.dataSourceName(),
                                    resources.connectionFactory(),
                                    resources.connectionFactoryName(),
-                                   resources.jdbcUrl(),
-                                   username,
-                                   password,
+                                   resources.connection(),
                                    clientId,
                                    inherit(channel.transacted(), defaults.transacted()).orElse(true),
                                    inherit(channel.allowObjectMessages(), defaults.allowObjectMessages()).orElse(false),
@@ -217,17 +212,16 @@ record AqRuntimeConfig(String channelName,
                 + (options.dataSourceName().isPresent() ? 1 : 0)
                 + (options.connectionFactory().isPresent() ? 1 : 0)
                 + (options.connectionFactoryName().isPresent() ? 1 : 0)
-                + (options.jdbcUrl().isPresent() ? 1 : 0);
+                + (options.connection().isPresent() ? 1 : 0);
     }
 
     private static void validateResources(AqChannelOptions options) {
         if (resourceCount(options) > 1) {
-            throw new IllegalArgumentException("AQ data source, connection factory, registry names, and JDBC URL "
+            throw new IllegalArgumentException("AQ data source, connection factory, registry names, and direct connection "
                                                        + "are mutually exclusive");
         }
-        requireNonBlank("data-source-name", options.dataSourceName());
-        requireNonBlank("connection-factory-name", options.connectionFactoryName());
-        requireNonBlank("jdbc-url", options.jdbcUrl());
+        requireNonBlank("data-source", options.dataSourceName());
+        requireNonBlank("connection-factory", options.connectionFactoryName());
     }
 
     private static void validateDestination(AqChannelOptions options) {

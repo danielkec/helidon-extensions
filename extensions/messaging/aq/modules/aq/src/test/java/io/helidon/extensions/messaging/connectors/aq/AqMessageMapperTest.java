@@ -398,7 +398,8 @@ class AqMessageMapperTest {
             }
         };
         AqRuntimeConfig config = AqRuntimeConfig.incoming(
-                AqConnectorConfig.builder().name("aq").destination("TEST").payloadConverter(converter).buildPrototype(),
+                AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
+                        .destination("TEST").payloadConverter(converter).buildPrototype(),
                 AqIncomingConfig.builder().connector("aq").channelName("test").build());
         TextMessage incoming = mock(TextMessage.class);
         when(incoming.getText()).thenReturn("42");
@@ -428,7 +429,8 @@ class AqMessageMapperTest {
     }
 
     private static AqRuntimeConfig config(AqPayloadType type, boolean allowObjectMessages) {
-        return AqRuntimeConfig.incoming(AqConnectorConfig.builder().name("aq").destination("TEST").payloadType(type)
+        return AqRuntimeConfig.incoming(AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
+                .destination("TEST").payloadType(type)
                                                .allowObjectMessages(allowObjectMessages).buildPrototype(),
                                        AqIncomingConfig.builder().connector("aq").channelName("test").build());
     }

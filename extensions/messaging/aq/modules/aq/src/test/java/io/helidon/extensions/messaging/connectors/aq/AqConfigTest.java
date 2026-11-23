@@ -25,6 +25,7 @@ import javax.jms.ConnectionFactory;
 import javax.jms.DeliveryMode;
 import javax.sql.DataSource;
 
+import io.helidon.common.Errors;
 import io.helidon.common.Size;
 import io.helidon.config.Config;
 import io.helidon.config.ConfigSources;
@@ -92,7 +93,7 @@ class AqConfigTest {
     void testChannelResourceSelectionReplacesConnectorSelection() {
         DataSource source = mock(DataSource.class);
         ConnectionFactory factory = mock(ConnectionFactory.class);
-        AqConnectorConfig defaults = AqConnectorConfig.builder(defaults())
+        AqConnectorConfig defaults = AqConnectorConfig.builder().name("aq").destination("ORDERS")
                 .dataSource(source)
                 .buildPrototype();
         AqOutgoingConfig channel = AqOutgoingConfig.builder(outgoing())
@@ -110,9 +111,9 @@ class AqConfigTest {
         Config config = Config.just(ConfigSources.create(Map.ofEntries(
                 Map.entry("destination", "ORDERS"),
                 Map.entry("schema", "AQ_OWNER"),
-                Map.entry("data-source-name", "shared-db"),
-                Map.entry("username", "user"),
-                Map.entry("password", "secret-password"),
+                Map.entry("connection.url", "jdbc:oracle:thin:@localhost:1521/FREEPDB1"),
+                Map.entry("connection.username", "user"),
+                Map.entry("connection.password", "secret-password"),
                 Map.entry("payload-type", "XML"),
                 Map.entry("receive-timeout", "PT1S"),
                 Map.entry("close-timeout", "PT4S"),
@@ -122,8 +123,8 @@ class AqConfigTest {
         AqRuntimeConfig runtime = AqRuntimeConfig.incoming(defaults, incoming());
 
         assertThat(runtime.schema(), is(Optional.of("AQ_OWNER")));
-        assertThat(runtime.dataSourceName(), is(Optional.of("shared-db")));
-        assertThat(runtime.password(), is(Optional.of("secret-password")));
+        assertThat(runtime.connection().orElseThrow().url(), is("jdbc:oracle:thin:@localhost:1521/FREEPDB1"));
+        assertThat(runtime.connection().orElseThrow().password(), is(Optional.of("secret-password")));
         assertThat(runtime.payloadType(), is(AqPayloadType.XML));
         assertThat(runtime.receiveTimeout(), is(Duration.ofSeconds(1)));
         assertThat(runtime.closeTimeout(), is(Duration.ofSeconds(4)));
@@ -131,10 +132,88 @@ class AqConfigTest {
         assertThat(runtime.maxLobCharacters(), is(17));
         assertThat(defaults.toString(), not(containsString("secret-password")));
         assertThat(runtime.toString(), not(containsString("secret-password")));
-        assertThat(AqIncomingConfig.builder(incoming()).password("secret-password").build().toString(),
+        assertThat(AqIncomingConfig.builder(incoming()).connection(defaults.connection().orElseThrow()).build().toString(),
                    not(containsString("secret-password")));
-        assertThat(AqOutgoingConfig.builder(outgoing()).password("secret-password").build().toString(),
+        assertThat(AqOutgoingConfig.builder(outgoing()).connection(defaults.connection().orElseThrow()).build().toString(),
                    not(containsString("secret-password")));
+    }
+
+    @Test
+    void connectionUrlIsRequiredAndCredentialsAreLocalToTheConnection() {
+        assertThrows(Errors.ErrorMessagesException.class, () -> AqConnectionConfig.builder().build());
+        assertThrows(NullPointerException.class, () -> AqConnectionConfig.builder().url(null));
+        for (String url : List.of("", " ", "\t\n")) {
+            assertThrows(IllegalArgumentException.class, () -> AqConnectionConfig.builder().url(url).build());
+        }
+        AqConnectionConfig connection = AqConnectionConfig.builder().url("jdbc:oracle:thin:@db").build();
+        assertThat(connection.username(), is(Optional.empty()));
+        assertThat(connection.password(), is(Optional.empty()));
+        assertThrows(Errors.ErrorMessagesException.class,
+                     () -> AqConnectorConfig.builder().connection(config -> config.username("user").password("secret")));
+    }
+
+    @Test
+    void missingSourceIsRejectedAfterInheritance() {
+        AqConnectorConfig defaults = AqConnectorConfig.builder().name("aq").destination("ORDERS").buildPrototype();
+        var failure = assertThrows(IllegalArgumentException.class, () -> AqRuntimeConfig.incoming(defaults, incoming()));
+        assertThat(failure.getMessage(), containsString("connection source"));
+        AqIncomingConfig channel = AqIncomingConfig.builder(incoming()).dataSourceName("channel-db").build();
+        assertThat(AqRuntimeConfig.incoming(defaults, channel).dataSourceName(), is(Optional.of("channel-db")));
+    }
+
+    @Test
+    void namedConnectionSourcesUseHelidonDataStyleKeys() {
+        AqConnectorConfig source = AqConnectorConfig.builder().name("aq").destination("ORDERS")
+                .config(Config.just(ConfigSources.create(Map.of("data-source", "orders-db")))).buildPrototype();
+        assertThat(AqRuntimeConfig.incoming(source, incoming()).dataSourceName(), is(Optional.of("orders-db")));
+        AqOutgoingConfig factory = AqOutgoingConfig.builder(outgoing())
+                .config(Config.just(ConfigSources.create(Map.of("connection-factory", "orders-factory")))).build();
+        AqRuntimeConfig effective = AqRuntimeConfig.outgoing(source, factory);
+        assertThat(effective.dataSourceName(), is(Optional.empty()));
+        assertThat(effective.connectionFactoryName(), is(Optional.of("orders-factory")));
+    }
+
+    @Test
+    void channelConnectionReplacesAllInheritedCredentials() {
+        AqConnectionConfig parent = AqConnectionConfig.builder().url("jdbc:oracle:thin:@parent")
+                .username("parent-user").password("parent-secret").build();
+        AqConnectorConfig defaults = AqConnectorConfig.builder().name("aq").destination("ORDERS")
+                .connection(parent).buildPrototype();
+        assertThat(AqRuntimeConfig.incoming(defaults, incoming()).connection().orElseThrow(), sameInstance(parent));
+
+        AqIncomingConfig channel = AqIncomingConfig.builder(incoming())
+                .connection(connection -> connection.url("jdbc:oracle:thin:@channel")).build();
+        AqConnectionConfig effective = AqRuntimeConfig.incoming(defaults, channel).connection().orElseThrow();
+        assertThat(effective.url(), is("jdbc:oracle:thin:@channel"));
+        assertThat(effective.username(), is(Optional.empty()));
+        assertThat(effective.password(), is(Optional.empty()));
+
+        DataSource source = mock(DataSource.class);
+        AqOutgoingConfig datasource = AqOutgoingConfig.builder(outgoing()).dataSource(source).build();
+        AqRuntimeConfig shared = AqRuntimeConfig.outgoing(defaults, datasource);
+        assertThat(shared.connection(), is(Optional.empty()));
+        assertThat(shared.dataSource().orElseThrow(), sameInstance(source));
+        verifyZeroInteractions(source);
+    }
+
+    @Test
+    void directConnectionConflictsWithOtherSourceModes() {
+        AqConnectionConfig direct = AqConnectionConfig.builder().url("jdbc:oracle:thin:@db").build();
+        for (AqConnectorConfig defaults : List.of(
+                AqConnectorConfig.builder().name("aq").destination("ORDERS").connection(direct)
+                        .dataSourceName("db").buildPrototype(),
+                AqConnectorConfig.builder().name("aq").destination("ORDERS").connection(direct)
+                        .dataSource(mock(DataSource.class)).buildPrototype(),
+                AqConnectorConfig.builder().name("aq").destination("ORDERS").connection(direct)
+                        .connectionFactoryName("factory").buildPrototype(),
+                AqConnectorConfig.builder().name("aq").destination("ORDERS").connection(direct)
+                        .connectionFactory(mock(ConnectionFactory.class)).buildPrototype())) {
+            var failure = assertThrows(IllegalArgumentException.class, () -> AqRuntimeConfig.incoming(defaults, incoming()));
+            assertThat(failure.getMessage(), containsString("mutually exclusive"));
+        }
+        AqOutgoingConfig conflictingChannel = AqOutgoingConfig.builder(outgoing()).connection(direct)
+                .dataSourceName("db").build();
+        assertThrows(IllegalArgumentException.class, () -> AqRuntimeConfig.outgoing(defaults(), conflictingChannel));
     }
 
     @Test
@@ -155,7 +234,7 @@ class AqConfigTest {
         assertThat(characterOverride.maxBodyBytes(), is(2048));
         assertThat(characterOverride.maxLobCharacters(), is(5));
 
-        Config config = Config.just(ConfigSources.create(Map.of("destination", "ORDERS",
+        Config config = Config.just(ConfigSources.create(Map.of("destination", "ORDERS", "data-source", "test-db",
                                                                 "max-body-bytes", "1 MiB")));
         AqConnectorConfig configured = AqConnectorConfig.builder().name("aq").config(config).buildPrototype();
         assertThat(AqRuntimeConfig.incoming(configured, incoming()).maxBodyBytes(), is(1_048_576));
@@ -248,11 +327,12 @@ class AqConfigTest {
 
     @Test
     void testCredentialsMustBeConfiguredTogether() {
-        for (var defaults : List.of(AqConnectorConfig.builder(defaults()).username("user").buildPrototype(),
-                                    AqConnectorConfig.builder(defaults()).password("password").buildPrototype())) {
-            var failure = assertThrows(IllegalArgumentException.class,
-                                       () -> AqRuntimeConfig.incoming(defaults, incoming()));
-            assertThat(failure.getMessage(), containsString("username and password must be configured together"));
+        for (AqConnectionConfig.Builder builder : List.of(AqConnectionConfig.builder().url("jdbc:oracle:thin:@db")
+                                                                 .username("user"),
+                                                         AqConnectionConfig.builder().url("jdbc:oracle:thin:@db")
+                                                                 .password("password"))) {
+            var failure = assertThrows(IllegalArgumentException.class, builder::build);
+            assertThat(failure.getMessage(), containsString("connection.username and connection.password must be configured together"));
         }
     }
 
@@ -306,6 +386,7 @@ class AqConfigTest {
     void testReconnectConfigurationKeys() {
         Config config = Config.just(ConfigSources.create(Map.of(
                 "destination", "ORDERS",
+                "data-source", "test-db",
                 "reconnect.enabled", "false",
                 "reconnect.retry.delay", "PT0.2S",
                 "reconnect.retry.max-delay", "PT2S",
@@ -366,7 +447,7 @@ class AqConfigTest {
     }
 
     private static AqConnectorConfig defaults() {
-        return AqConnectorConfig.builder().name("aq").destination("ORDERS").buildPrototype();
+        return AqConnectorConfig.builder().name("aq").destination("ORDERS").dataSourceName("test-db").buildPrototype();
     }
 
     private static AqIncomingConfig incoming() {

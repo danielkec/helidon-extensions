@@ -17,6 +17,7 @@
 package io.helidon.extensions.messaging.connectors.aq;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -172,8 +173,10 @@ final class AqResources implements AutoCloseable {
             if (isClosed()) {
                 return;
             }
-            Connection created = config.username().isPresent()
-                    ? factory.createConnection(config.username().orElseThrow(), config.password().orElseThrow())
+            Optional<AqConnectionConfig> directConnection = config.connection().filter(it -> it.username().isPresent());
+            Connection created = directConnection.isPresent()
+                    ? factory.createConnection(directConnection.orElseThrow().username().orElseThrow(),
+                                               directConnection.orElseThrow().password().orElseThrow())
                     : factory.createConnection();
             if (!publish(created)) {
                 return;

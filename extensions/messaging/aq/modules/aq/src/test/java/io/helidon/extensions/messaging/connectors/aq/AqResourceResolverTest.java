@@ -119,16 +119,17 @@ class AqResourceResolverTest {
     }
 
     @Test
-    void testDefaultDataSourcePrecedesDefaultFactory() {
+    void testMissingSourceIsRejectedEvenWithUnqualifiedRegistryResources() {
         DataSource source = mock(DataSource.class);
         ConnectionFactory factory = mock(ConnectionFactory.class);
-        var config = config(AqConnectorConfig.builder().name("aq").buildPrototype());
         var manager = ServiceRegistryManager.create(registryConfig()
                 .putContractInstance(DataSource.class, source)
                 .putContractInstance(ConnectionFactory.class, factory)
                 .build());
         try {
-            assertThat(new AqResourceResolver(manager.registry()).resolve(config), instanceOf(AQjmsConnectionFactory.class));
+            var failure = assertThrows(IllegalArgumentException.class,
+                                       () -> config(AqConnectorConfig.builder().name("aq").buildPrototype()));
+            assertThat(failure.getMessage(), containsString("connection source"));
             verifyZeroInteractions(source, factory);
         } finally {
             manager.shutdown();
@@ -136,76 +137,13 @@ class AqResourceResolverTest {
     }
 
     @Test
-    void testNamedDataSourceDoesNotInterceptDefaultFactory() {
-        DataSource analytics = mock(DataSource.class);
-        ConnectionFactory factory = mock(ConnectionFactory.class);
-        var manager = ServiceRegistryManager.create(registryConfig()
-                .putContractInstance(ConnectionFactory.class, factory)
-                .putServiceInstance(new NamedDescriptor<>(DataSource.class, "analytics"), analytics)
-                .build());
-        try {
-            var config = config(AqConnectorConfig.builder().name("aq").buildPrototype());
-            assertThat(new AqResourceResolver(manager.registry()).resolve(config), sameInstance(factory));
-            verifyZeroInteractions(analytics, factory);
-        } finally {
-            manager.shutdown();
-        }
-    }
-
-    @Test
-    void testLazyNamedDataSourceIsNotInitializedForDefaultLookup() {
+    void testLazyNamedDataSourceIsNotInitializedForOtherNamedLookup() {
         assertLazyNamedResourceIgnored(DataSource.class);
     }
 
     @Test
-    void testLazyNamedFactoryIsNotInitializedForDefaultLookup() {
+    void testLazyNamedFactoryIsNotInitializedForOtherNamedLookup() {
         assertLazyNamedResourceIgnored(ConnectionFactory.class);
-    }
-
-    @Test
-    void testUnqualifiedDataSourceFailureDoesNotFallBackToFactory() {
-        var expected = new IllegalStateException("default database unavailable");
-        ConnectionFactory factory = mock(ConnectionFactory.class);
-        var descriptor = new ResourceDescriptor<>(DataSource.class, "defaultSource", Set.of(), FactoryType.SERVICE, 100, () -> {
-            throw expected;
-        });
-        var manager = ServiceRegistryManager.create(registryConfig()
-                .putContractInstance(ConnectionFactory.class, factory)
-                .addServiceDescriptor(descriptor)
-                .build());
-        try {
-            var config = config(AqConnectorConfig.builder().name("aq").buildPrototype());
-            var failure = assertThrows(IllegalStateException.class,
-                                       () -> new AqResourceResolver(manager.registry()).resolve(config));
-            assertThat(failure, sameInstance(expected));
-            verifyZeroInteractions(factory);
-        } finally {
-            manager.shutdown();
-        }
-    }
-
-    @Test
-    void testHighestRankedDefaultFactoryIsSelectedWithoutInitializingFallback() {
-        ConnectionFactory preferred = mock(ConnectionFactory.class);
-        var fallbackInitializations = new AtomicInteger();
-        var fallback = new ResourceDescriptor<>(ConnectionFactory.class, "fallback", Set.of(), FactoryType.SERVICE, 100, () -> {
-            fallbackInitializations.incrementAndGet();
-            throw new IllegalStateException("unused fallback factory unavailable");
-        });
-        var higherRanked = new ResourceDescriptor<>(ConnectionFactory.class, "preferred", Set.of(), FactoryType.SERVICE, 200,
-                                                   () -> preferred);
-        var manager = ServiceRegistryManager.create(registryConfig()
-                .addServiceDescriptor(fallback)
-                .addServiceDescriptor(higherRanked)
-                .build());
-        try {
-            var config = config(AqConnectorConfig.builder().name("aq").buildPrototype());
-            assertThat(new AqResourceResolver(manager.registry()).resolve(config), sameInstance(preferred));
-            assertThat(fallbackInitializations.get(), is(0));
-            verifyZeroInteractions(preferred);
-        } finally {
-            manager.shutdown();
-        }
     }
 
     @Test
@@ -214,7 +152,7 @@ class AqResourceResolverTest {
         ConnectionFactory defaults = mock(ConnectionFactory.class);
         Service.ServicesFactory<ConnectionFactory> provider = () -> List.of(
                 Service.QualifiedInstance.create(named, Qualifier.createNamed("analytics")),
-                Service.QualifiedInstance.create(defaults));
+                Service.QualifiedInstance.create(defaults, Qualifier.createNamed("orders")));
         var descriptor = new ResourceDescriptor<>(ConnectionFactory.class, "provider", Set.of(Qualifier.createNamed("provider")),
                                                  FactoryType.SERVICES, 200, () -> provider);
         var manager = ServiceRegistryManager.create(registryConfig()
@@ -222,8 +160,6 @@ class AqResourceResolverTest {
                 .build());
         try {
             var resolver = new AqResourceResolver(manager.registry());
-            var config = config(AqConnectorConfig.builder().name("aq").buildPrototype());
-            assertThat(resolver.resolve(config), sameInstance(defaults));
             var namedConfig = config(AqConnectorConfig.builder().name("aq").connectionFactoryName("analytics").buildPrototype());
             assertThat(resolver.resolve(namedConfig), sameInstance(named));
             verifyZeroInteractions(named, defaults);
@@ -233,39 +169,17 @@ class AqResourceResolverTest {
     }
 
     @Test
-    void testServicesFactoryWithOnlyNamedInstancesDoesNotInterceptDefault() {
-        ConnectionFactory named = mock(ConnectionFactory.class);
+    void testNamedInjectionPointFactoryIsResolved() {
         ConnectionFactory defaults = mock(ConnectionFactory.class);
-        Service.ServicesFactory<ConnectionFactory> provider = () -> List.of(
-                Service.QualifiedInstance.create(named, Qualifier.createNamed("analytics")));
-        var descriptor = new ResourceDescriptor<>(ConnectionFactory.class, "provider", Set.of(), FactoryType.SERVICES, 200,
-                                                 () -> provider);
-        var fallback = new ResourceDescriptor<>(ConnectionFactory.class, "fallback", Set.of(), FactoryType.SERVICE, 100,
-                                               () -> defaults);
-        var manager = ServiceRegistryManager.create(registryConfig()
-                .addServiceDescriptor(descriptor)
-                .addServiceDescriptor(fallback)
-                .build());
-        try {
-            var config = config(AqConnectorConfig.builder().name("aq").buildPrototype());
-            assertThat(new AqResourceResolver(manager.registry()).resolve(config), sameInstance(defaults));
-            verifyZeroInteractions(named, defaults);
-        } finally {
-            manager.shutdown();
-        }
-    }
-
-    @Test
-    void testInjectionPointFactoryUsesInstanceQualifiers() {
-        ConnectionFactory defaults = mock(ConnectionFactory.class);
-        Service.InjectionPointFactory<ConnectionFactory> provider = _ -> Optional.of(Service.QualifiedInstance.create(defaults));
-        var descriptor = new ResourceDescriptor<>(ConnectionFactory.class, "provider", Set.of(Qualifier.createNamed("provider")),
+        Service.InjectionPointFactory<ConnectionFactory> provider = _ ->
+                Optional.of(Service.QualifiedInstance.create(defaults, Qualifier.createNamed("orders")));
+        var descriptor = new ResourceDescriptor<>(ConnectionFactory.class, "provider", Set.of(Qualifier.createNamed("orders")),
                                                  FactoryType.INJECTION_POINT, 200, () -> provider);
         var manager = ServiceRegistryManager.create(registryConfig()
                 .addServiceDescriptor(descriptor)
                 .build());
         try {
-            var config = config(AqConnectorConfig.builder().name("aq").buildPrototype());
+            var config = config(AqConnectorConfig.builder().name("aq").connectionFactoryName("orders").buildPrototype());
             assertThat(new AqResourceResolver(manager.registry()).resolve(config), sameInstance(defaults));
             verifyZeroInteractions(defaults);
         } finally {
@@ -281,8 +195,8 @@ class AqResourceResolverTest {
                 .build());
         try {
             var resolver = new AqResourceResolver(manager.registry());
-            var defaults = config(AqConnectorConfig.builder().name("aq").buildPrototype());
-            assertThrows(MessagingException.class, () -> resolver.resolve(defaults));
+            assertThrows(IllegalArgumentException.class,
+                         () -> config(AqConnectorConfig.builder().name("aq").buildPrototype()));
 
             var named = config(AqConnectorConfig.builder().name("aq").dataSourceName("analytics").buildPrototype());
             assertThat(resolver.resolve(named), instanceOf(AQjmsConnectionFactory.class));
@@ -300,8 +214,8 @@ class AqResourceResolverTest {
                 .build());
         try {
             var resolver = new AqResourceResolver(manager.registry());
-            var defaults = config(AqConnectorConfig.builder().name("aq").buildPrototype());
-            assertThrows(MessagingException.class, () -> resolver.resolve(defaults));
+            assertThrows(IllegalArgumentException.class,
+                         () -> config(AqConnectorConfig.builder().name("aq").buildPrototype()));
 
             var named = config(AqConnectorConfig.builder().name("aq").connectionFactoryName("orders").buildPrototype());
             assertThat(resolver.resolve(named), sameInstance(factory));
@@ -316,7 +230,7 @@ class AqResourceResolverTest {
         ServiceRegistry registry = mock(ServiceRegistry.class);
         var config = config(AqConnectorConfig.builder()
                                     .name("aq")
-                                    .jdbcUrl("jdbc:oracle:thin:@localhost:1521/FREEPDB1")
+                                    .connection(connection -> connection.url("jdbc:oracle:thin:@localhost:1521/FREEPDB1"))
                                     .buildPrototype());
 
         assertThat(new AqResourceResolver(registry).resolve(config), instanceOf(AQjmsConnectionFactory.class));
@@ -344,15 +258,15 @@ class AqResourceResolverTest {
                                                      initializations.incrementAndGet();
                                                      throw expected;
                                                  });
-        var defaultDescriptor = new ResourceDescriptor<>(ConnectionFactory.class, "defaultFactory", Set.of(),
-                                                        FactoryType.SERVICE, 100, () -> defaults);
+        var defaultDescriptor = new ResourceDescriptor<>(ConnectionFactory.class, "defaultFactory",
+                                                        Set.of(Qualifier.createNamed("orders")), FactoryType.SERVICE, 100, () -> defaults);
         var manager = ServiceRegistryManager.create(registryConfig()
                 .addServiceDescriptor(defaultDescriptor)
                 .addServiceDescriptor(descriptor)
                 .build());
         try {
             var resolver = new AqResourceResolver(manager.registry());
-            var config = config(AqConnectorConfig.builder().name("aq").buildPrototype());
+            var config = config(AqConnectorConfig.builder().name("aq").connectionFactoryName("orders").buildPrototype());
             assertThat(resolver.resolve(config), sameInstance(defaults));
             assertThat(initializations.get(), is(0));
 

@@ -142,7 +142,7 @@ class AqEnqueueTransformationConfigTest {
     }
 
     private static AqConnectorConfig defaults() {
-        return AqConnectorConfig.builder().name("aq").destination("ORDERS").buildPrototype();
+        return AqConnectorConfig.builder().name("aq").dataSourceName("test-db").destination("ORDERS").buildPrototype();
     }
 
     private static AqIncomingConfig incoming() {

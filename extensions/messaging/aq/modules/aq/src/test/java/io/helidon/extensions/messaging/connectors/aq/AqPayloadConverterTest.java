@@ -100,7 +100,8 @@ class AqPayloadConverterTest {
     @Test
     void invalidNativeMapsRemainRejectedEvenWhenObjectMessagesAreEnabled() throws Exception {
         AqRuntimeConfig nativeConfig = AqRuntimeConfig.incoming(
-                AqConnectorConfig.builder().name("aq").destination("TEST").allowObjectMessages(true).buildPrototype(),
+                AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
+                        .destination("TEST").allowObjectMessages(true).buildPrototype(),
                 AqIncomingConfig.builder().connector("aq").channelName("test").build());
         for (Map<?, ?> invalid : List.of(Map.of(7, "value"), Map.of("", "value"),
                                         Map.of("nested", Map.of("label", "order")))) {
@@ -151,7 +152,8 @@ class AqPayloadConverterTest {
 
     private static AqRuntimeConfig config(AqPayloadConverter converter) {
         return AqRuntimeConfig.incoming(
-                AqConnectorConfig.builder().name("aq").destination("TEST").payloadConverter(converter).buildPrototype(),
+                AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
+                        .destination("TEST").payloadConverter(converter).buildPrototype(),
                 AqIncomingConfig.builder().connector("aq").channelName("test").build());
     }
 }

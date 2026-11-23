@@ -133,7 +133,7 @@ class AqReplyToTest {
     }
 
     private static AqRuntimeConfig config() {
-        return AqRuntimeConfig.incoming(AqConnectorConfig.builder().name("aq").buildPrototype(),
+        return AqRuntimeConfig.incoming(AqConnectorConfig.builder().name("aq").dataSourceName("test-db").buildPrototype(),
                                         AqIncomingConfig.builder()
                                                 .connector("aq")
                                                 .channelName("requests")

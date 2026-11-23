@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -46,6 +47,8 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import io.helidon.common.GenericType;
 import io.helidon.common.Size;
 import io.helidon.common.media.type.MediaTypes;
+import io.helidon.common.types.ResolvedType;
+import io.helidon.common.types.TypeName;
 import io.helidon.config.Config;
 import io.helidon.extensions.messaging.connectors.aq.AqAdt;
 import io.helidon.extensions.messaging.connectors.aq.AqBlob;
@@ -73,6 +76,7 @@ import io.helidon.messaging.MessagingException;
 import io.helidon.messaging.MessagingGraph;
 import io.helidon.messaging.MessagingRuntime;
 import io.helidon.service.registry.DescriptorHandler;
+import io.helidon.service.registry.Qualifier;
 import io.helidon.service.registry.ServiceDescriptor;
 import io.helidon.service.registry.ServiceDiscovery;
 import io.helidon.service.registry.ServiceRegistryConfig;
@@ -189,6 +193,36 @@ class AqConnectorIT {
             assertThat(result.getInt(1), is(1));
         }
         assertThat("committed input must not be delivered again", receiveText("TEXT_QUEUE", 200), nullValue());
+    }
+
+    @Test
+    void directConnectionUsesNestedCredentials() throws Exception {
+        AqConnector connector = AqConnector.builder().name("direct-aq").connection(database.connection())
+                .destination("TEXT_QUEUE").build();
+        try (var outgoing = connector.outgoing(AqOutgoingConfig.builder()
+                .connector("direct-aq").channelName("direct-outgoing").build())) {
+            outgoing.start();
+            outgoing.sendBatch(MessageBatch.create(AqMessage.create("direct connection")));
+        }
+        TextMessage received = receiveText("TEXT_QUEUE", 5_000);
+        assertThat(received, notNullValue());
+        assertThat(received.getText(), is("direct connection"));
+    }
+
+    @Test
+    void channelDataSourceOverridesDirectConnectionAndItsCredentials() throws Exception {
+        var direct = database.connection();
+        AqConnector connector = AqConnector.builder().name("overridden-aq")
+                .connection(connection -> connection.from(direct).password("incorrect-password"))
+                .destination("TEXT_QUEUE").build();
+        try (var outgoing = connector.outgoing(AqOutgoingConfig.builder()
+                .connector("overridden-aq").channelName("shared-outgoing").dataSource(database.dataSource()).build())) {
+            outgoing.start();
+            outgoing.sendBatch(MessageBatch.create(AqMessage.create("shared source override")));
+        }
+        TextMessage received = receiveText("TEXT_QUEUE", 5_000);
+        assertThat(received, notNullValue());
+        assertThat(received.getText(), is("shared source override"));
     }
 
     @Test
@@ -1251,6 +1285,7 @@ class AqConnectorIT {
                   connector:
                     test-aq:
                       type: helidon-aq
+                      data-source: shared-db
                       destination: %s
                       schema: %s
                       receive-timeout: PT0.2S
@@ -1271,7 +1306,8 @@ class AqConnectorIT {
                 .discoverServicesFromServiceLoader(false)
                 .addServiceDescriptors(descriptors)
                 .putContractInstance(Config.class, Config.just(yaml, MediaTypes.APPLICATION_YAML))
-                .putContractInstance(DataSource.class, database.dataSource());
+                .putContractInstance(DataSource.class, database.dataSource())
+                .putServiceInstance(new NamedDataSourceDescriptor(), database.dataSource());
         if (receiver != null) {
             config.putContractInstance(ConsumerRegistration.class, receiver);
         }
@@ -1324,6 +1360,28 @@ class AqConnectorIT {
             }
         }
         throw new AssertionError("AQ message did not reach state " + state);
+    }
+
+    private static final class NamedDataSourceDescriptor implements ServiceDescriptor<DataSource> {
+        @Override
+        public TypeName serviceType() {
+            return TypeName.create(NamedDataSourceDescriptor.class);
+        }
+
+        @Override
+        public TypeName descriptorType() {
+            return TypeName.create(NamedDataSourceDescriptor.class);
+        }
+
+        @Override
+        public Set<ResolvedType> contracts() {
+            return Set.of(ResolvedType.create(DataSource.class));
+        }
+
+        @Override
+        public Set<Qualifier> qualifiers() {
+            return Set.of(Qualifier.createNamed("shared-db"));
+        }
     }
 
     private static final class Receiver implements ConsumerRegistration {

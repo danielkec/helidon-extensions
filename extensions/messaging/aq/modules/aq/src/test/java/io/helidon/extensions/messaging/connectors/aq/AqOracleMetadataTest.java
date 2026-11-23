@@ -267,7 +267,8 @@ class AqOracleMetadataTest {
     }
 
     private static AqRuntimeConfig config(AqPayloadType type) {
-        return AqRuntimeConfig.incoming(AqConnectorConfig.builder().name("aq").destination("TEST").payloadType(type)
+        return AqRuntimeConfig.incoming(AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
+                .destination("TEST").payloadType(type)
                                                .buildPrototype(),
                                        AqIncomingConfig.builder().connector("aq").channelName("test").build());
     }

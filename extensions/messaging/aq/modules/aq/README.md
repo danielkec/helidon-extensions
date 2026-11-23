@@ -22,20 +22,17 @@ These are specification API dependencies, not Helidon JMS connectors.
 
 ## Shared data source
 
-Register the application-owned `javax.sql.DataSource` with Helidon's Service Registry. The connector resolves
-the unqualified data source when no explicit connection resource is configured. Use `data-source-name` to
-select a named data source. The same data source can serve multiple AQ channels and ordinary application JDBC code.
-Default resource selection considers only unqualified services. Named data sources and connection factories require
-an explicit name selection, so an unrelated named service cannot override the application's default AQ factory.
-Statically named providers are excluded before initialization. Providers that determine instance qualifiers at
-runtime still need to be initialized to select an unqualified instance.
+Register the application-owned `javax.sql.DataSource` with Helidon's Service Registry and select its name with
+`data-source`. The same data source can serve multiple AQ channels and ordinary application JDBC code.
+Each effective channel configuration must select exactly one connection source; the connector does not search
+for an unqualified data source or connection factory when no source is selected.
 
 ```yaml
 messaging:
   connector:
     orders-aq:
       type: helidon-aq
-      data-source-name: orders
+      data-source: orders
       schema: ORDERS
   incoming:
     orders-in:
@@ -62,10 +59,23 @@ connections and sessions; it does not close the data source or its pool. Sharing
 share a connection or transaction between channels or application code. Atomic database changes plus AQ
 receive/send across application resources require a separate transaction integration.
 
-As alternatives, configure an application-supplied Oracle AQ `ConnectionFactory`, its registry name, or a
-`jdbc-url` with `username` and `password`. Resource choices are mutually exclusive. A resource selected at
-channel level overrides the connector's resource selection as a unit. Configure wallets and JDBC/pool-specific
-properties on the supplied data source or connection factory.
+As alternatives, supply an Oracle AQ `ConnectionFactory` through `.connectionFactory(factory)`, select its registry
+name with `connection-factory`, or configure a direct database connection:
+
+```yaml
+connection:
+  url: jdbc:oracle:thin:@localhost:1521/FREEPDB1
+  username: orders
+  password: ${ORDERS_PASSWORD}
+```
+
+The `connection.url` is required and nonblank whenever `connection` is configured. Its `username` and `password`
+are optional, but must be supplied together; otherwise Oracle's connection configuration supplies authentication.
+Programmatic configuration uses `.connection(connection -> connection.url(url).username(user).password(password))`.
+Resource choices are mutually exclusive. A source selected at channel level replaces the connector's source
+selection and its credentials as a unit. A channel without a source inherits the connector's complete selection.
+Credentials inside `connection` apply only to that direct connection. Shared data sources and connection factories
+supply their own credentials. Configure wallets and JDBC/pool-specific properties on those supplied resources.
 
 ## JNDI destination lookup
 
@@ -76,7 +86,7 @@ messaging:
   connector:
     orders-aq:
       type: helidon-aq
-      data-source-name: orders
+      data-source: orders
   outgoing:
     orders-out:
       connector: orders-aq
@@ -456,7 +466,7 @@ messaging:
   connector:
     orders-aq:
       type: helidon-aq
-      data-source-name: orders
+      data-source: orders
       reconnect:
         enabled: true
         retry:
@@ -502,19 +512,18 @@ that connector using `connector: <name>` and can override the settings for their
 applies to both directions; **Incoming** and **Outgoing** identify the channel behavior affected by the setting.
 Defaults below apply after inheritance. Durations use the ISO-8601 format accepted by `java.time.Duration`.
 
-Connection-resource choices are mutually exclusive at each scope: `data-source-name`, `connection-factory-name`,
-`jdbc-url`, or a programmatically supplied data source or connection factory. Selecting a resource on a channel
-replaces the inherited resource choice as a unit. Without an explicit choice, the connector selects an unqualified
-Service Registry data source, then an unqualified connection factory. Credentials inherit independently; the effective
-`username` and `password` must either both be present or both be absent.
+Connection-resource choices are mutually exclusive at each scope: `data-source`, `connection-factory`, `connection`,
+or a programmatically supplied data source or connection factory. Exactly one source is required after connector/channel
+inheritance. Selecting a source on a channel replaces the inherited source and its credentials as a unit.
+Direct credentials belong to the `connection` block and do not override shared resource credentials.
 
 | Setting | Scope | Default and constraints |
 | --- | --- | --- |
-| `data-source-name` | Common | Absent; when set, selects a nonblank Service Registry data-source name |
-| `connection-factory-name` | Common | Absent; when set, selects a nonblank Service Registry AQ connection-factory name |
-| `jdbc-url` | Common | Absent; when set, uses a nonblank Oracle JDBC URL |
-| `username` | Common | Absent; when set, must be nonblank and accompanied by `password`; otherwise the selected resource supplies credentials |
-| `password` | Common | Absent; must be configured together with `username` |
+| `data-source` | Common | Absent; selects a nonblank Service Registry data-source name; Java builders use `dataSourceName(...)` |
+| `connection-factory` | Common | Absent; selects a nonblank Service Registry AQ connection-factory name; Java builders use `connectionFactoryName(...)` |
+| `connection.url` | Common | Required nonblank JDBC URL when `connection` is selected |
+| `connection.username` | Common | Absent; when set, must be nonblank and accompanied by `connection.password` |
+| `connection.password` | Common | Absent; must be configured together with `connection.username` |
 | `client-id` | Common | Absent; leaves the provider's client identifier unchanged. When set, must be nonblank and is applied to each channel connection |
 | `destination` | Common | Nonblank existing queue name; required in direct naming mode after inheritance |
 | `schema` | Common | Connected database user; when set, must be nonblank and selects the direct destination's owner |

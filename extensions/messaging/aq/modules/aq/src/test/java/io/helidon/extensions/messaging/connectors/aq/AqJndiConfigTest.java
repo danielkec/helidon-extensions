@@ -51,7 +51,8 @@ class AqJndiConfigTest {
                 "jndi.env-properties.java.naming.factory.initial", "example.ContextFactory",
                 "jndi.env-properties.java.naming.provider.url", "ldap://directory.example",
                 "jndi.env-properties.java.naming.security.credentials", "test-secret")));
-        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").config(config).buildPrototype();
+        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
+                .config(config).buildPrototype();
         AqRuntimeConfig runtime = AqRuntimeConfig.incoming(connector, incoming());
         AqJndiConfig jndi = runtime.jndi().orElseThrow();
 
@@ -98,7 +99,7 @@ class AqJndiConfigTest {
     @Test
     void jndiDefaultsSupportIncomingAndOutgoingChannelsWithoutDirectNames() {
         AqJndiConfig jndi = AqJndiConfig.builder().destination("topics/Orders").build();
-        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq")
+        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
                 .jndi(jndi).destinationType(AqDestinationType.TOPIC).buildPrototype();
 
         AqRuntimeConfig incoming = AqRuntimeConfig.incoming(connector, incoming());
@@ -112,7 +113,7 @@ class AqJndiConfigTest {
 
     @Test
     void channelJndiReplacesDirectConnectorDestinationAndSchema() {
-        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq")
+        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
                 .destination("ORDERS").schema("APP").buildPrototype();
         AqIncomingConfig channel = AqIncomingConfig.builder(incoming())
                 .jndi(jndi -> jndi.destination("queues/Orders")).build();
@@ -125,7 +126,7 @@ class AqJndiConfigTest {
 
     @Test
     void directChannelSelectionReplacesJndiDefaults() {
-        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq")
+        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
                 .jndi(jndi -> jndi.destination("queues/Orders")).buildPrototype();
         AqOutgoingConfig channel = AqOutgoingConfig.builder(outgoing()).destination("PHYSICAL_ORDERS").build();
         AqRuntimeConfig runtime = AqRuntimeConfig.outgoing(connector, channel);
@@ -142,7 +143,7 @@ class AqJndiConfigTest {
 
     @Test
     void directDestinationsAndSchemasStillInheritIndependently() {
-        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq")
+        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
                 .destination("ORDERS").schema("APP").buildPrototype();
         AqRuntimeConfig nameOverride = AqRuntimeConfig.incoming(connector,
                 AqIncomingConfig.builder(incoming()).destination("OTHER_ORDERS").build());
@@ -159,7 +160,8 @@ class AqJndiConfigTest {
 
     @Test
     void connectorSchemaCanSupplyChannelsWithDifferentDirectDestinations() {
-        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").schema("APP").buildPrototype();
+        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
+                .schema("APP").buildPrototype();
         AqRuntimeConfig incoming = AqRuntimeConfig.incoming(connector,
                 AqIncomingConfig.builder(incoming()).destination("INCOMING_ORDERS").build());
         AqRuntimeConfig outgoing = AqRuntimeConfig.outgoing(connector,
@@ -173,7 +175,7 @@ class AqJndiConfigTest {
 
     @Test
     void channelJndiReplacesTheWholeEnvironment() {
-        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq")
+        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
                 .jndi(jndi -> jndi.destination("queues/Default")
                         .putEnvProperty("java.naming.provider.url", "ldap://default.example")
                         .putEnvProperty("java.naming.security.credentials", "parent-secret"))
@@ -190,7 +192,7 @@ class AqJndiConfigTest {
 
     @Test
     void schemaOnlyOverrideCannotReuseTheInheritedJndiNameAsADirectQueue() {
-        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq")
+        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
                 .jndi(jndi -> jndi.destination("queues/Orders")).buildPrototype();
         var failure = assertThrows(IllegalArgumentException.class, () -> AqRuntimeConfig.incoming(connector,
                 AqIncomingConfig.builder(incoming()).schema("APP").build()));
@@ -201,13 +203,14 @@ class AqJndiConfigTest {
     void sameScopeJndiAndDirectOptionsConflict() {
         AqJndiConfig jndi = AqJndiConfig.builder().destination("queues/Orders").build();
         for (AqConnectorConfig connector : List.of(
-                AqConnectorConfig.builder().name("aq").jndi(jndi).destination("ORDERS").buildPrototype(),
-                AqConnectorConfig.builder().name("aq").jndi(jndi).schema("APP").buildPrototype())) {
+                AqConnectorConfig.builder().name("aq").dataSourceName("test-db")
+                        .jndi(jndi).destination("ORDERS").buildPrototype(),
+                AqConnectorConfig.builder().name("aq").dataSourceName("test-db").jndi(jndi).schema("APP").buildPrototype())) {
             var failure = assertThrows(IllegalArgumentException.class,
                                        () -> AqRuntimeConfig.incoming(connector, incoming()));
             assertThat(failure.getMessage(), containsString("mutually exclusive"));
         }
-        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").buildPrototype();
+        AqConnectorConfig connector = AqConnectorConfig.builder().name("aq").dataSourceName("test-db").buildPrototype();
         for (AqOutgoingConfig channel : List.of(
                 AqOutgoingConfig.builder(outgoing()).jndi(jndi).destination("ORDERS").build(),
                 AqOutgoingConfig.builder(outgoing()).jndi(jndi).schema("APP").build())) {

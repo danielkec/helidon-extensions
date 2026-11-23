@@ -445,7 +445,7 @@ class AqLobTest {
     }
 
     private static AqRuntimeConfig config(int binaryLimit, int characterLimit) {
-        return AqRuntimeConfig.incoming(AqConnectorConfig.builder().name("aq").destination("TEST")
+        return AqRuntimeConfig.incoming(AqConnectorConfig.builder().name("aq").dataSourceName("test-db").destination("TEST")
                                                 .payloadType(AqPayloadType.ADT).maxBodyBytes(Size.create(binaryLimit))
                                                 .maxLobCharacters(characterLimit).buildPrototype(),
                                         AqIncomingConfig.builder().connector("aq").channelName("test").build());

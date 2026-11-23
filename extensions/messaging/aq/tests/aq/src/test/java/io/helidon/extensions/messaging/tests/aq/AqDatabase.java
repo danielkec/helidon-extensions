@@ -29,6 +29,8 @@ import java.util.concurrent.TimeUnit;
 
 import javax.sql.DataSource;
 
+import io.helidon.extensions.messaging.connectors.aq.AqConnectionConfig;
+
 import oracle.jdbc.pool.OracleDataSource;
 
 final class AqDatabase implements AutoCloseable {
@@ -79,6 +81,10 @@ final class AqDatabase implements AutoCloseable {
 
     DataSource dataSource() {
         return dataSource;
+    }
+
+    AqConnectionConfig connection() throws SQLException {
+        return AqConnectionConfig.builder().url(dataSource.getURL()).username(schema).password(SCHEMA_PASSWORD).build();
     }
 
     String schema() {
