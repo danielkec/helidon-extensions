@@ -460,8 +460,8 @@ final class AqMessageMapper {
             return null;
         }
         if (value instanceof AqAdt adt) {
-            Object[] attributes = new Object[adt.attributes().size()];
             List<Object> detached = adt.attributes();
+            Object[] attributes = new Object[detached.size()];
             for (int i = 0; i < attributes.length; i++) {
                 attributes[i] = attach(detached.get(i), connection, resources);
             }
