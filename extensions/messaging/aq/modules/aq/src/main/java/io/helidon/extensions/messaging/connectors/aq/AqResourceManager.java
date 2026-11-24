@@ -200,7 +200,7 @@ final class AqResourceManager implements AutoCloseable {
 
     private void recover() {
         try {
-            config.reconnect().retry().invoke(_ -> recoverAttempt());
+            config.reconnect().retry().invoke(this::recoverAttempt);
         } catch (RuntimeException e) {
             lock.lock();
             try {

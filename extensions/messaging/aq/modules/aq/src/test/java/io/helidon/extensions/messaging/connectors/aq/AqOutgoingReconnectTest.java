@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Supplier;
 
 import javax.jms.Connection;
 import javax.jms.ConnectionFactory;
@@ -38,8 +39,8 @@ import javax.jms.Queue;
 import javax.jms.Session;
 import javax.jms.TextMessage;
 
-import io.helidon.faulttolerance.RetryException;
-import io.helidon.faulttolerance.RetryOutcome;
+import io.helidon.faulttolerance.Retry;
+import io.helidon.faulttolerance.RetryTimeoutException;
 import io.helidon.messaging.BatchDeliveryException;
 import io.helidon.messaging.BatchItemStatus;
 import io.helidon.messaging.Message;
@@ -63,6 +64,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -75,13 +77,15 @@ import static org.mockito.Mockito.when;
 @Timeout(10)
 class AqOutgoingReconnectTest {
     @Test
-    void nonTransactedFailureRetainsPrefixAndDoesNotReplayTheFailedBatch() throws Exception {
+    void supplierOnlyRetryRecoversWithoutReplayingTheFailedBatch() throws Exception {
         Client original = client(false);
         Client replacement = client(false);
         ConnectionFactory factory = factory(original, replacement);
         JMSException lost = connectionFailure();
         failSecondSend(original, lost);
-        AqOutgoingChannel channel = channel(config(factory, false).buildPrototype());
+        Retry retry = mock(Retry.class, CALLS_REAL_METHODS);
+        doAnswer(invocation -> invocation.<Supplier<?>>getArgument(0).get()).when(retry).invoke(any(Supplier.class));
+        AqOutgoingChannel channel = channel(config(factory, false).reconnect(reconnect().retry(retry).build()).buildPrototype());
         channel.start();
         try {
             MessageBatch<String> batch = batch("first", "second", "third");
@@ -96,6 +100,7 @@ class AqOutgoingReconnectTest {
 
             verify(original.session(), never()).createTextMessage("third");
             verifyReplacementOnlySentNext(replacement);
+            verify(retry).invoke(any(Supplier.class));
             verify(factory, times(2)).createConnection();
             verify(original.connection()).close();
         } finally {
@@ -524,9 +529,8 @@ class AqOutgoingReconnectTest {
                                                                   () -> channel.sendBatch(batch("first")));
             assertThat(originalFailure.outcome(0).status(), is(BatchItemStatus.INDETERMINATE));
             BatchDeliveryException unavailable = assertUnavailableBatch(channel);
-            assertThat(unavailable.getCause().getCause(), instanceOf(RetryException.class));
-            assertThat(((RetryException) unavailable.getCause().getCause()).termination(),
-                       is(RetryOutcome.Termination.RETRIES_EXHAUSTED));
+            assertThat(unavailable.getCause().getCause(), instanceOf(MessagingException.class));
+            assertThat(unavailable.getCause().getCause().getMessage(), is("AQ connection recovery attempt failed"));
             assertUnavailableBatch(channel);
 
             verify(factory, times(3)).createConnection();
@@ -555,9 +559,7 @@ class AqOutgoingReconnectTest {
         try {
             assertThrows(BatchDeliveryException.class, () -> channel.sendBatch(batch("first")));
             BatchDeliveryException unavailable = assertUnavailableBatch(channel);
-            assertThat(unavailable.getCause().getCause(), instanceOf(RetryException.class));
-            assertThat(((RetryException) unavailable.getCause().getCause()).termination(),
-                       is(RetryOutcome.Termination.TIMED_OUT));
+            assertThat(unavailable.getCause().getCause(), instanceOf(RetryTimeoutException.class));
             assertUnavailableBatch(channel);
 
             verify(factory, times(2)).createConnection();

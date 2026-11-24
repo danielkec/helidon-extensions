@@ -32,8 +32,6 @@ import javax.jms.Queue;
 import javax.jms.Session;
 import javax.jms.TextMessage;
 
-import io.helidon.faulttolerance.RetryException;
-import io.helidon.faulttolerance.RetryOutcome;
 import io.helidon.messaging.ConnectorDelivery;
 import io.helidon.messaging.ConnectorDeliveryReservation;
 import io.helidon.messaging.IncomingConnectorContext;
@@ -389,8 +387,8 @@ class AqIncomingReconnectTest {
                 .build());
         try {
             MessagingException failure = assertThrows(MessagingException.class, () -> channel.run(context(reservation)));
-            assertThat(failure.getCause(), instanceOf(RetryException.class));
-            assertThat(((RetryException) failure.getCause()).termination(), is(RetryOutcome.Termination.RETRIES_EXHAUSTED));
+            assertThat(failure.getCause(), instanceOf(MessagingException.class));
+            assertThat(failure.getCause().getMessage(), is("AQ connection recovery attempt failed"));
             verify(factory, times(3)).createConnection();
             verify(reservation, never()).start(any(MessageBatch.class));
             verify(reservation).close();
