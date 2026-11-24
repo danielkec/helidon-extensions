@@ -162,8 +162,10 @@ does not force a Serializable map into ObjectMessage; there is no explicit wire-
 A received ObjectMessage that was not passed through an incoming converter retains its ObjectMessage kind when its
 `AqMessage` envelope is forwarded without an outgoing converter; the outgoing channel must also enable object messages.
 
-Use `AqMessage.mapBuilder(map)`, the `AqMessage.create(Map)` overload, or a no-argument builder with a Map interface
-entity type to construct a map envelope. The generic `AqMessage.builder(entity)` overload rejects map arguments.
+Use `AqMessage.builder(map)`, the `AqMessage.create(Map)` overload, or a no-argument builder with a Map interface
+entity type to construct a map envelope. The Map overload infers `Map<K, V>` even for a concrete map argument.
+Explicitly selecting the generic overload, or passing a map as `Object`, is rejected to avoid promising a concrete
+payload type that the immutable snapshot does not preserve.
 For buffers, declare the entity type as `ByteBuffer`; snapshots do not retain a concrete buffer subclass. Bytes-message
 mapping sends the buffer's remaining bytes without advancing its position.
 

@@ -857,7 +857,7 @@ class AqConnectorIT {
             assertThat(forwarded.entity(), is(first));
 
             Map<Object, Object> second = Map.of(7, Map.of("label", "second"), "items", List.of("second"));
-            outgoing.sendBatch(MessageBatch.create(AqMessage.mapBuilder(second).build()));
+            outgoing.sendBatch(MessageBatch.create(AqMessage.builder(second).build()));
             Message<?> created = received.poll(20, TimeUnit.SECONDS);
             assertThat(created, instanceOf(AqMessage.class));
             assertThat(created.entity(), is(second));

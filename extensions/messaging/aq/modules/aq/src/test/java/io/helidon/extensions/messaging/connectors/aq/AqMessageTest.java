@@ -110,7 +110,7 @@ class AqMessageTest {
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("binary", bytes);
         map.put("empty", null);
-        AqMessage<Map<String, Object>> message = AqMessage.mapBuilder(map).build();
+        AqMessage<Map<String, Object>> message = AqMessage.builder(map).build();
         bytes[0] = 4;
         map.put("later", true);
         ((byte[]) message.entity().get("binary"))[1] = 5;
@@ -182,12 +182,18 @@ class AqMessageTest {
         HashMap<String, Object> entity = new HashMap<>();
         entity.put("one", 1);
         AqMessage<Map<String, Object>> message = AqMessage.create(entity);
-        AqMessage<Map<String, Object>> built = AqMessage.mapBuilder(entity).build();
+        var builder = AqMessage.builder(entity);
+        AqMessageConfig.Builder<Map<String, Object>> typedBuilder = builder;
+        var built = typedBuilder.build();
         entity.clear();
         assertThat(message.entity(), is(Map.of("one", 1)));
         assertThat(built.entity(), is(Map.of("one", 1)));
         assertThrows(IllegalArgumentException.class, () -> AqMessage.<HashMap<String, Object>>create(entity));
-        assertThrows(IllegalArgumentException.class, () -> AqMessage.builder(entity));
+        assertThrows(UnsupportedOperationException.class, () -> built.entity().put("two", 2));
+        assertThrows(IllegalArgumentException.class, () -> AqMessage.<HashMap<String, Object>>builder(entity));
+        Object erased = entity;
+        assertThrows(IllegalArgumentException.class, () -> AqMessage.builder(erased));
+        assertThrows(NullPointerException.class, () -> AqMessage.builder((Map<String, Object>) null));
     }
 
     @Test

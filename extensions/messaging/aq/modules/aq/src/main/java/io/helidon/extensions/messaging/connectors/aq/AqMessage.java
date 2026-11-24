@@ -111,7 +111,7 @@ public sealed interface AqMessage<T> extends Message<T> permits AqOutgoingMessag
 
     /**
      * Create an outgoing message builder.
-     * When setting a map entity, declare its payload type as the Map interface or use {@link #mapBuilder(Map)}.
+     * When setting a map entity, declare its payload type as the Map interface or use {@link #builder(Map)}.
      * Buffer entity types must be declared as {@link java.nio.ByteBuffer}, rather than a concrete subclass.
      *
      * @param <T> entity type
@@ -123,7 +123,7 @@ public sealed interface AqMessage<T> extends Message<T> permits AqOutgoingMessag
 
     /**
      * Create an outgoing message builder with an entity.
-     * Map entities require {@link #mapBuilder(Map)}. For a payload-only map message, use {@link #create(Map)}.
+     * Map entities use the {@link #builder(Map) Map overload}. For a payload-only map message, use {@link #create(Map)}.
      *
      * @param entity non-null entity
      * @param <T> entity type
@@ -133,7 +133,7 @@ public sealed interface AqMessage<T> extends Message<T> permits AqOutgoingMessag
      */
     static <T> AqMessageConfig.Builder<T> builder(T entity) {
         if (entity instanceof Map<?, ?>) {
-            throw new IllegalArgumentException("AQ map payloads must use mapBuilder or the Map-typed create overload");
+            throw new IllegalArgumentException("AQ map payloads must use the Map-typed builder or create overload");
         }
         return AqMessage.<T>builder().entity(Objects.requireNonNull(entity));
     }
@@ -147,13 +147,14 @@ public sealed interface AqMessage<T> extends Message<T> permits AqOutgoingMessag
      * @return builder
      * @throws NullPointerException if the entity is {@code null}
      */
-    static <K, V> AqMessageConfig.Builder<Map<K, V>> mapBuilder(Map<K, V> entity) {
+    // Agreed exception to DEV-GUIDELINES 8.4.4.1: this third overload preserves the Map interface payload type.
+    static <K, V> AqMessageConfig.Builder<Map<K, V>> builder(Map<K, V> entity) {
         return AqMessage.<Map<K, V>>builder().entity(Objects.requireNonNull(entity));
     }
 
     /**
      * Create an outgoing payload-only message.
-     * This overload rejects map entities. Use the {@link #create(Map) Map overload} or {@link #mapBuilder(Map)}
+     * This overload rejects map entities. Use the {@link #create(Map) Map overload} or {@link #builder(Map)}
      * so the envelope's entity type is the Map interface.
      *
      * @param entity non-null entity
@@ -176,7 +177,7 @@ public sealed interface AqMessage<T> extends Message<T> permits AqOutgoingMessag
      * @throws NullPointerException if the entity is {@code null}
      */
     static <K, V> AqMessage<Map<K, V>> create(Map<K, V> entity) {
-        return mapBuilder(entity).build();
+        return builder(entity).build();
     }
 
     @Override

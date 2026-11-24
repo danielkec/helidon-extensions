@@ -99,7 +99,7 @@ public final class AqOutgoingMessage<T> implements AqMessage<T>, RuntimeType.Api
 
     /**
      * Create an outgoing message builder.
-     * Map entity types must use the Map interface; {@link AqMessage#mapBuilder(Map)} supplies that type automatically.
+     * Map entity types must use the Map interface; {@link AqMessage#builder(Map)} supplies that type automatically.
      * Buffer entity types must use {@link java.nio.ByteBuffer}, rather than a concrete buffer subclass.
      *
      * @param <T> payload type

@@ -59,7 +59,7 @@ class AqPayloadConverterTest {
     @Test
     void genericAndAqApplicationMapsAreConvertedBeforeSelectingTheWireType() throws Exception {
         Map<Object, Object> entity = applicationMap("order");
-        for (Message<?> message : List.of(Message.create(entity), AqMessage.mapBuilder(entity).build())) {
+        for (Message<?> message : List.of(Message.create(entity), AqMessage.builder(entity).build())) {
             Session session = mock(Session.class);
             TextMessage outgoing = mock(TextMessage.class);
             when(session.createTextMessage("order")).thenReturn(outgoing);
@@ -83,7 +83,7 @@ class AqPayloadConverterTest {
         when(incoming.getText()).thenReturn("order");
         when(incoming.getPropertyNames()).thenReturn(Collections.emptyEnumeration());
         List<AqMessage<?>> messages = List.of(AqMessageMapper.fromNative(incoming, config(converter)),
-                                              AqMessage.mapBuilder(source).build());
+                                              AqMessage.builder(source).build());
 
         source.clear();
         bytes[0] = 99;
@@ -108,7 +108,7 @@ class AqPayloadConverterTest {
             Session session = mock(Session.class);
             MapMessage nativeMessage = mock(MapMessage.class);
             when(session.createMapMessage()).thenReturn(nativeMessage);
-            AqMessage<?> message = AqMessage.mapBuilder(invalid).build();
+            AqMessage<?> message = AqMessage.builder(invalid).build();
 
             assertThrows(MessagingException.class, () -> AqMessageMapper.toNative(session, message, nativeConfig));
 
