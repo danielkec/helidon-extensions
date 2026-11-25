@@ -24,6 +24,7 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import io.helidon.builder.api.Prototype;
+import io.helidon.common.Size;
 
 import org.apache.pulsar.client.api.BatchReceivePolicy;
 import org.apache.pulsar.client.api.Consumer;
@@ -241,7 +242,7 @@ final class PulsarConnectorConfigSupport {
                                     channel.batchIndexAcknowledgmentEnabled().orElse(common.batchIndexAcknowledgmentEnabled()),
                                     channel.receiverQueueSize().orElse(common.receiverQueueSize()),
                                     channel.batchReceiveMaxMessages().orElse(common.batchReceiveMaxMessages()),
-                                    channel.batchReceiveMaxBytes().orElse(common.batchReceiveMaxBytes()),
+                                    batchBytes(channel.batchReceiveMaxBytes().orElse(common.batchReceiveMaxBytes())),
                                     channel.maxMessageBytes().orElse(common.maxMessageBytes()),
                                     channel.receiveTimeout().orElse(common.receiveTimeout()),
                                     channel.negativeAckRedeliveryDelay().orElse(common.negativeAckRedeliveryDelay()),
@@ -285,6 +286,17 @@ final class PulsarConnectorConfigSupport {
         if (value < 1) {
             throw new IllegalArgumentException(name + " must be greater than zero");
         }
+    }
+
+    private static int batchBytes(Size size) {
+        int bytes;
+        try {
+            bytes = Math.toIntExact(size.toBytes());
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException(BATCH_RECEIVE_MAX_BYTES_PROPERTY + " must fit in a signed integer", e);
+        }
+        requirePositive(BATCH_RECEIVE_MAX_BYTES_PROPERTY, bytes);
+        return bytes;
     }
 
     private static void requireReceiveTimeout(Duration timeout) {
@@ -364,7 +376,7 @@ final class PulsarConnectorConfigSupport {
             requireNonNullEntries(PRODUCER_PROPERTIES_PROPERTY, target.producerProperties());
             requirePositive(RECEIVER_QUEUE_SIZE_PROPERTY, target.receiverQueueSize());
             requirePositive(BATCH_RECEIVE_MAX_MESSAGES_PROPERTY, target.batchReceiveMaxMessages());
-            requirePositive(BATCH_RECEIVE_MAX_BYTES_PROPERTY, target.batchReceiveMaxBytes());
+            batchBytes(target.batchReceiveMaxBytes());
             requirePositive(MAX_MESSAGE_BYTES_PROPERTY, target.maxMessageBytes());
             requireReceiveTimeout(target.receiveTimeout());
             requireSendTimeout(target.sendTimeout());
@@ -389,7 +401,7 @@ final class PulsarConnectorConfigSupport {
             target.consumerProperties().ifPresent(values -> requireNonNullEntries(CONSUMER_PROPERTIES_PROPERTY, values));
             target.receiverQueueSize().ifPresent(value -> requirePositive(RECEIVER_QUEUE_SIZE_PROPERTY, value));
             target.batchReceiveMaxMessages().ifPresent(value -> requirePositive(BATCH_RECEIVE_MAX_MESSAGES_PROPERTY, value));
-            target.batchReceiveMaxBytes().ifPresent(value -> requirePositive(BATCH_RECEIVE_MAX_BYTES_PROPERTY, value));
+            target.batchReceiveMaxBytes().ifPresent(PulsarConnectorConfigSupport::batchBytes);
             target.maxMessageBytes().ifPresent(value -> requirePositive(MAX_MESSAGE_BYTES_PROPERTY, value));
             target.receiveTimeout().ifPresent(PulsarConnectorConfigSupport::requireReceiveTimeout);
             target.settlementTimeout().ifPresent(value -> requirePositive(SETTLEMENT_TIMEOUT_PROPERTY, value));

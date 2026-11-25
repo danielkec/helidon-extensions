@@ -699,6 +699,36 @@ class PulsarConnectorIT {
 
     @Test
     @Timeout(90)
+    void testQueueHeadroomAllowsFullBatchesAfterOversizedSingleton() throws Exception {
+        String topic = uniqueName("refill-batch");
+        String subscription = uniqueName("refill-batch-reader");
+        List<String> payloads = List.of("oversized", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j");
+        String yaml = batchYaml(topic, subscription, """
+                receiver-queue-size: 7
+                batch-receive-max-messages: 5
+                batch-receive-max-bytes: 6
+                receive-timeout: PT1M
+                execution:
+                  max-pending-messages: 7
+                  max-in-flight-messages: 7
+                """);
+        try (PulsarClient client = newClient()) {
+            seedBacklog(client, topic, subscription, payloads);
+            ServiceRegistryManager manager = PulsarScenarioRegistry.create(yaml, BatchReceiver.class);
+            try {
+                BatchReceiver receiver = manager.registry().get(BatchReceiver.class);
+                manager.registry().get(MessagingRuntime.class);
+                List<MessageBatch<String>> batches = receiveBatches(receiver, payloads.size());
+                assertThat(batches.stream().map(MessageBatch::size).toList(), is(List.of(1, 5, 5)));
+                assertThat(batchPayloads(batches), is(payloads));
+            } finally {
+                manager.shutdown();
+            }
+        }
+    }
+
+    @Test
+    @Timeout(90)
     void testByteThresholdFlushesBeforeCountOrTimeoutAndAllowsOversizedSingleton() throws Exception {
         try (PulsarClient client = newClient()) {
             for (List<String> payloads : List.of(List.of("aa", "bb", "cc"), List.of("oversized"))) {

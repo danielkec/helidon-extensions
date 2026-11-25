@@ -36,7 +36,7 @@ messaging:
       service-url: pulsar://pulsar.example:6650
       schema: STRING
       batch-receive-max-messages: 100
-      batch-receive-max-bytes: 10485760
+      batch-receive-max-bytes: 10 MiB
       receiver-queue-size: 100
       receive-timeout: PT0.1S
       send-timeout: PT30S
@@ -144,15 +144,23 @@ independently of producer batching and outgoing Helidon batch boundaries.
 | Incoming option | Default | Meaning |
 | --- | --- | --- |
 | `batch-receive-max-messages` | `100` | Maximum messages requested in one batch |
-| `batch-receive-max-bytes` | `10485760` | Encoded byte target for one batch, 10 MiB |
+| `batch-receive-max-bytes` | `10 MiB` | Encoded size target for one batch, from 1 to 2147483647 bytes |
 | `receive-timeout` | `PT0.1S` | Maximum native wait to accumulate a batch |
 | `receiver-queue-size` | `100` | Client prefetch queue size per topic partition |
 | `max-message-bytes` | `10485760` | Maximum encoded payload size for each incoming message |
 
-The effective batch count is the minimum of `batch-receive-max-messages`, `receiver-queue-size`, and the messaging
-runtime's delivery limit. The runtime also bounds each partition's receive queue. The connector reserves capacity before
-acquiring a batch and pauses acquisition while processing and settling it. Aggregate client prefetch across partitions
-can exceed the retained delivery limit.
+The effective queue size is the smaller of `receiver-queue-size` and the runtime delivery limit. The effective batch
+count is the smaller of that queue size and `batch-receive-max-messages`.
+The connector reserves capacity before acquiring a batch and pauses acquisition while processing and settling it.
+Aggregate client prefetch across partitions can exceed the retained delivery limit.
+
+Pulsar asks the broker to refill several queue slots at a time. With a queue and batch count of five, an oversized
+first message can be delivered alone and leave four small messages in the queue. If those four fall below the byte
+threshold, the next batch can wait for `receive-timeout` even with a broker backlog.
+
+To leave room for refills, configure `receiver-queue-size: 7` with `batch-receive-max-messages: 5` and a runtime
+delivery limit of at least seven. Pulsar can then prefetch two extra messages per partition, allowing the next
+five-message batch to fill while the client waits to return receiver permits.
 
 Native automatic receiver-queue scaling is disabled to preserve the per-partition queue bound. The connector owns this
 setting and overrides `consumer-properties.autoScaledReceiverQueueSizeEnabled`.
@@ -182,7 +190,7 @@ PulsarConnector pulsar = PulsarConnector.builder()
         .serviceUrl("pulsar://localhost:6650")
         .schema(PulsarSchemaType.STRING)
         .batchReceiveMaxMessages(100)
-        .batchReceiveMaxBytes(10 * 1024 * 1024)
+        .batchReceiveMaxBytes(Size.create(10, Size.Unit.MIB))
         .receiverQueueSize(100)
         .receiveTimeout(Duration.ofMillis(100))
         .build();

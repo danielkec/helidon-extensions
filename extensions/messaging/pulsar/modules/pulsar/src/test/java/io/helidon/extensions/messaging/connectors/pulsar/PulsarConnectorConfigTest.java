@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import io.helidon.common.Size;
 import io.helidon.config.Config;
 import io.helidon.config.ConfigSources;
 
@@ -77,7 +78,7 @@ class PulsarConnectorConfigTest {
         assertThat(config.batchIndexAcknowledgmentEnabled(), is(false));
         assertThat(config.receiverQueueSize(), is(100));
         assertThat(config.batchReceiveMaxMessages(), is(100));
-        assertThat(config.batchReceiveMaxBytes(), is(10 * 1024 * 1024));
+        assertThat(config.batchReceiveMaxBytes().toBytes(), is(10L * 1024 * 1024));
         assertThat(config.maxMessageBytes(), is(10 * 1024 * 1024));
         assertThat(config.receiveTimeout(), is(Duration.ofMillis(100)));
         assertThat(config.settlementTimeout(), is(Duration.ofSeconds(30)));
@@ -91,7 +92,7 @@ class PulsarConnectorConfigTest {
                 "schema", "BYTES",
                 "schema-provider", "orders-json",
                 "batch-receive-max-messages", "40",
-                "batch-receive-max-bytes", "4096",
+                "batch-receive-max-bytes", "4 KiB",
                 "client-properties.authPluginClassName", "example.Auth")));
         PulsarIncomingConfig incoming = PulsarIncomingConfig.create(channelConfig(Map.of(
                 "connector", "pulsar",
@@ -109,7 +110,7 @@ class PulsarConnectorConfigTest {
         assertThat(connector.prototype().schema(), is(PulsarSchemaType.BYTES));
         assertThat(connector.prototype().schemaProvider().orElseThrow(), is("orders-json"));
         assertThat(connector.prototype().batchReceiveMaxMessages(), is(40));
-        assertThat(connector.prototype().batchReceiveMaxBytes(), is(4096));
+        assertThat(connector.prototype().batchReceiveMaxBytes().toBytes(), is(4096L));
         assertThat(connector.prototype().clientProperties(), is(Map.of("authPluginClassName", "example.Auth")));
         assertThat(incoming.channelName(), is(CHANNEL));
         assertThat(outgoing.channelName(), is(CHANNEL));
@@ -118,7 +119,7 @@ class PulsarConnectorConfigTest {
         assertThat(incoming.schema().orElseThrow(), is(PulsarSchemaType.INT32));
         assertThat(incoming.subscriptionName().orElseThrow(), is("orders-subscription"));
         assertThat(incoming.batchReceiveMaxMessages().orElseThrow(), is(1));
-        assertThat(incoming.batchReceiveMaxBytes().orElseThrow(), is(1024));
+        assertThat(incoming.batchReceiveMaxBytes().orElseThrow().toBytes(), is(1024L));
         assertThat(incoming.consumerProperties().orElseThrow(), is(Map.of("consumerName", "orders-consumer")));
         assertThat(outgoing.producerProperties().orElseThrow(), is(Map.of("producerName", "orders-producer")));
     }
@@ -134,7 +135,7 @@ class PulsarConnectorConfigTest {
                 .batchIndexAcknowledgmentEnabled(true)
                 .receiverQueueSize(8)
                 .batchReceiveMaxMessages(6)
-                .batchReceiveMaxBytes(4096)
+                .batchReceiveMaxBytes(Size.create(4096))
                 .maxMessageBytes(2048)
                 .receiveTimeout(Duration.ofSeconds(2))
                 .negativeAckRedeliveryDelay(Duration.ofSeconds(3))
@@ -224,7 +225,7 @@ class PulsarConnectorConfigTest {
         PulsarConnectorConfig common = commonBuilder()
                 .receiverQueueSize(80)
                 .batchReceiveMaxMessages(60)
-                .batchReceiveMaxBytes(4096)
+                .batchReceiveMaxBytes(Size.create(4096))
                 .receiveTimeout(Duration.ofMillis(250))
                 .consumerProperties(Map.of("receiverQueueSize", "1000"))
                 .buildPrototype();
@@ -245,7 +246,7 @@ class PulsarConnectorConfigTest {
 
         var single = configuredConsumer(common, incomingBuilder()
                 .batchReceiveMaxMessages(1)
-                .batchReceiveMaxBytes(512)
+                .batchReceiveMaxBytes(Size.create(512))
                 .receiveTimeout(Duration.ofMillis(50))
                 .build(), 100);
         assertThat(single.policy().getMaxNumMessages(), is(1));
@@ -256,10 +257,11 @@ class PulsarConnectorConfigTest {
     @Test
     void validatesBatchBoundsFromBuildersAndConfiguration() {
         for (int value : List.of(0, -1)) {
+            Size size = Size.create(value);
             assertThrows(IllegalArgumentException.class, () -> commonBuilder().batchReceiveMaxMessages(value).build());
-            assertThrows(IllegalArgumentException.class, () -> commonBuilder().batchReceiveMaxBytes(value).build());
+            assertThrows(IllegalArgumentException.class, () -> commonBuilder().batchReceiveMaxBytes(size).build());
             assertThrows(IllegalArgumentException.class, () -> incomingBuilder().batchReceiveMaxMessages(value).build());
-            assertThrows(IllegalArgumentException.class, () -> incomingBuilder().batchReceiveMaxBytes(value).build());
+            assertThrows(IllegalArgumentException.class, () -> incomingBuilder().batchReceiveMaxBytes(size).build());
             for (String key : List.of("batch-receive-max-messages", "batch-receive-max-bytes")) {
                 assertThrows(IllegalArgumentException.class, () -> PulsarConnector.create(config(Map.of(
                         "name", "pulsar",
@@ -271,6 +273,9 @@ class PulsarConnectorConfigTest {
                         key, Integer.toString(value)))));
             }
         }
+        Size oversized = Size.create(2, Size.Unit.GIB);
+        assertThrows(IllegalArgumentException.class, () -> commonBuilder().batchReceiveMaxBytes(oversized).build());
+        assertThrows(IllegalArgumentException.class, () -> incomingBuilder().batchReceiveMaxBytes(oversized).build());
         assertThrows(IllegalArgumentException.class,
                      () -> commonBuilder().receiveTimeout(Duration.ofMillis(Integer.MAX_VALUE).plusMillis(1)).build());
         assertThrows(IllegalArgumentException.class,
