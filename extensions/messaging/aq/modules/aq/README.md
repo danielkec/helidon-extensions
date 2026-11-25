@@ -585,9 +585,13 @@ application-wide filter for all outgoing channels sharing the same data source.
 | --- | --- | --- |
 | `delivery-mode` | Outgoing | `2` (persistent); `1` selects nonpersistent delivery, subject to Oracle queue support |
 | `priority` | Outgoing | `4`; integer in the range `0` through `9` |
-| `time-to-live` | Outgoing | `PT0S` (no expiry); otherwise at least one millisecond. Oracle AQ starts expiration when the message becomes ready |
+| `time-to-live` | Outgoing | Defaults to `PT0S` (no expiry). Positive values must be between 1 and 2,147,483,647 milliseconds inclusive. Oracle AQ starts expiration when the message becomes ready |
 | `enqueue-transformation.name` | Outgoing | Existing Oracle transformation name; required when the policy is enabled, and must be nonblank whenever present |
 | `enqueue-transformation.enabled` | Outgoing | `true` within a configured policy; an absent policy applies no transformation, and `false` disables an inherited policy |
+
+The Oracle AQ driver stores positive lifetimes in whole seconds, rounding down. For example, `PT60.5S` stores
+60 seconds and `PT0.5S` stores zero seconds of lifetime. Only the exact value zero selects no expiry.
+The upper bound prevents overflow when the driver converts milliseconds to a signed 32-bit integer.
 
 An explicit channel `enqueue-transformation` policy replaces the whole connector policy. Incoming channels do not
 apply it. The selected transformation must satisfy the classic-AQ and database requirements described above.

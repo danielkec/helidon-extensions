@@ -43,6 +43,8 @@ interface AqOutgoingOptions {
 
     /**
      * Message lifetime. Zero means no expiration and is the default.
+     * Positive durations must be between 1 and 2,147,483,647 milliseconds inclusive.
+     * The AQ driver rounds positive lifetimes down to whole seconds.
      *
      * @return message lifetime
      */

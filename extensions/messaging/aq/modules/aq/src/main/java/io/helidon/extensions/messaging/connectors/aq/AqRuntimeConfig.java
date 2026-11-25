@@ -132,6 +132,10 @@ record AqRuntimeConfig(String channelName,
         requireMillis("receive-timeout", receiveTimeout, false);
         requireMillis("close-timeout", closeTimeout, false);
         requireMillis("time-to-live", timeToLive, true);
+        // The Oracle AQ JDBC enqueue path narrows milliseconds to an int before converting to seconds.
+        if (timeToLive.compareTo(Duration.ofMillis(Integer.MAX_VALUE)) > 0) {
+            throw new IllegalArgumentException("time-to-live must not exceed 2147483647 milliseconds");
+        }
         if (maxLobCharacters < 1) {
             throw new IllegalArgumentException("max-lob-characters must be greater than zero");
         }

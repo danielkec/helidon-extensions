@@ -288,13 +288,25 @@ class AqConfigTest {
     }
 
     @Test
+    void testTimeToLiveRange() {
+        Duration maximum = Duration.ofMillis(Integer.MAX_VALUE);
+        for (Duration ttl : List.of(Duration.ZERO, Duration.ofMillis(1), Duration.ofMillis(500),
+                                    Duration.ofMillis(60_500), maximum)) {
+            var channel = AqOutgoingConfig.builder(outgoing()).timeToLive(ttl).build();
+            assertThat(AqRuntimeConfig.outgoing(defaults(), channel).timeToLive(), is(ttl));
+        }
+        for (Duration ttl : List.of(Duration.ofMillis(-1), Duration.ofNanos(1), maximum.plusMillis(1), Duration.ofDays(50))) {
+            var channel = AqOutgoingConfig.builder(outgoing()).timeToLive(ttl).build();
+            var failure = assertThrows(IllegalArgumentException.class, () -> AqRuntimeConfig.outgoing(defaults(), channel));
+            assertThat(failure.getMessage(), containsString("time-to-live"));
+        }
+    }
+
+    @Test
     void testInvalidDurationAndProducerOptionsAreRejectedBeforeStart() {
         assertThrows(IllegalArgumentException.class,
                      () -> AqRuntimeConfig.incoming(defaults(),
                              AqIncomingConfig.builder(incoming()).receiveTimeout(Duration.ofNanos(1)).build()));
-        assertThrows(IllegalArgumentException.class,
-                     () -> AqRuntimeConfig.outgoing(defaults(),
-                             AqOutgoingConfig.builder(outgoing()).timeToLive(Duration.ofSeconds(-1)).build()));
         assertThrows(IllegalArgumentException.class,
                      () -> AqRuntimeConfig.outgoing(defaults(),
                              AqOutgoingConfig.builder(outgoing()).deliveryMode(3).build()));
