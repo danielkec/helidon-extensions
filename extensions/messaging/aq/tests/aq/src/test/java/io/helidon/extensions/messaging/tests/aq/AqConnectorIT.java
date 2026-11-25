@@ -196,6 +196,32 @@ class AqConnectorIT {
     }
 
     @Test
+    void connectorCreatedFactoriesPreserveJmsPriorities() throws Exception {
+        for (int priority : List.of(0, 4, 9)) {
+            String options = priority == 4 ? "" : "priority: " + priority;
+            messaging(runtime("PRIORITY_QUEUE", options, "", null)).emit("outgoing", AqMessage.create("named-" + priority));
+        }
+        assertPriorities("named");
+
+        var shared = AqConnector.builder().name("shared").dataSource(database.dataSource()).destination("PRIORITY_QUEUE").build();
+        var direct = AqConnector.builder().name("direct").connection(database.connection()).destination("PRIORITY_QUEUE").build();
+        for (var connector : List.of(shared, direct)) {
+            String name = connector.prototype().name();
+            for (int priority : List.of(0, 4, 9)) {
+                var channel = AqOutgoingConfig.builder().connector(name).channelName("priority");
+                if (priority != 4) {
+                    channel.priority(priority);
+                }
+                try (var outgoing = connector.outgoing(channel.build())) {
+                    outgoing.start();
+                    outgoing.sendBatch(MessageBatch.create(AqMessage.create(name + "-" + priority)));
+                }
+            }
+            assertPriorities(name);
+        }
+    }
+
+    @Test
     void directConnectionUsesNestedCredentials() throws Exception {
         AqConnector connector = AqConnector.builder().name("direct-aq").connection(database.connection())
                 .destination("TEXT_QUEUE").build();
@@ -1315,6 +1341,20 @@ class AqConnectorIT {
         managers.add(manager);
         messaging(manager);
         return manager;
+    }
+
+    private void assertPriorities(String source) throws Exception {
+        try (Connection connection = AQjmsFactory.getConnectionFactory(database.dataSource(), true).createConnection();
+             Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+             MessageConsumer consumer = session.createConsumer(((AQjmsSession) session).getQueue(database.schema(), "PRIORITY_QUEUE"))) {
+            connection.start();
+            for (int priority : List.of(9, 4, 0)) {
+                TextMessage message = (TextMessage) consumer.receive(5_000);
+                assertThat(source, message, notNullValue());
+                assertThat(source, message.getText(), is(source + "-" + priority));
+                assertThat(source, message.getJMSPriority(), is(priority));
+            }
+        }
     }
 
     private TextMessage receiveText(String queue, long timeout) throws Exception {

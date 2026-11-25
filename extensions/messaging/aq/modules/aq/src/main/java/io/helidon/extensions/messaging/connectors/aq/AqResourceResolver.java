@@ -50,10 +50,10 @@ final class AqResourceResolver {
                 return config.connectionFactory().orElseThrow();
             }
             if (config.dataSource().isPresent()) {
-                return AQjmsFactory.getConnectionFactory(config.dataSource().orElseThrow());
+                return AQjmsFactory.getConnectionFactory(config.dataSource().orElseThrow(), true);
             }
             if (config.connection().isPresent()) {
-                return AQjmsFactory.getConnectionFactory(config.connection().orElseThrow().url(), new Properties());
+                return AQjmsFactory.getConnectionFactory(config.connection().orElseThrow().url(), new Properties(), true);
             }
             ServiceRegistry services = registry.get();
             if (config.connectionFactoryName().isPresent()) {
@@ -65,7 +65,7 @@ final class AqResourceResolver {
                 String name = config.dataSourceName().orElseThrow();
                 DataSource source = services.firstNamed(DataSource.class, name)
                         .orElseThrow(() -> missing(config, "DataSource named " + name));
-                return AQjmsFactory.getConnectionFactory(source);
+                return AQjmsFactory.getConnectionFactory(source, true);
             }
             throw new MessagingException("No AQ connection source is configured for channel " + config.channelName());
         } catch (JMSException e) {

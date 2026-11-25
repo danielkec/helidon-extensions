@@ -59,8 +59,21 @@ connections and sessions; it does not close the data source or its pool. Sharing
 share a connection or transaction between channels or application code. Atomic database changes plus AQ
 receive/send across application resources require a separate transaction integration.
 
-As alternatives, supply an Oracle AQ `ConnectionFactory` through `.connectionFactory(factory)`, select its registry
-name with `connection-factory`, or configure a direct database connection:
+For a data source or direct JDBC URL, the connector creates an Oracle AQ factory with JMS compliance enabled.
+On a queue sorted by priority, a JMS priority of `9` is delivered ahead of the default `4`, followed by `0`.
+If the application supplies a factory directly or by registry name (`connection-factory`), it owns the factory and
+configures its compliance mode. To use the same JMS priorities with a supplied factory:
+
+```java
+ConnectionFactory factory = AQjmsFactory.getConnectionFactory(sharedDataSource, true);
+AqConnector connector = AqConnector.builder()
+        .name("orders-aq")
+        .connectionFactory(factory)
+        .schema("ORDERS")
+        .build();
+```
+
+For a direct database connection, configure the JDBC URL and optional credentials:
 
 ```yaml
 connection:
