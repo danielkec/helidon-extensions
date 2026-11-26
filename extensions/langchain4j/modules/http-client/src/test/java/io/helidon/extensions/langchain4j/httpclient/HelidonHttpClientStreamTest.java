@@ -16,6 +16,7 @@
 
 package io.helidon.extensions.langchain4j.httpclient;
 
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -23,6 +24,7 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
@@ -36,6 +38,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -53,6 +56,7 @@ import dev.langchain4j.http.client.sse.ServerSentEventContext;
 import dev.langchain4j.http.client.sse.ServerSentEventListener;
 import dev.langchain4j.http.client.sse.ServerSentEventParser;
 import io.helidon.webclient.api.WebClient;
+import io.helidon.webclient.api.WebClientServiceResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -65,6 +69,7 @@ class HelidonHttpClientStreamTest {
 
     private final AtomicReference<Throwable> serverFailure = new AtomicReference<>();
     private final AtomicReference<Thread> workerThread = new AtomicReference<>();
+    private final CountDownLatch bodyBytesRead = new CountDownLatch(1);
     private HttpServer server;
     private ExecutorService serverExecutor;
     private WebClient webClient;
@@ -190,13 +195,15 @@ class HelidonHttpClientStreamTest {
                 handlerFinished.countDown();
             }
         });
-        startClient();
+        startClientWithObservedBody();
         RecordingSubscriber subscriber = new RecordingSubscriber();
         try {
             client.stream(request("/silent"), new DefaultServerSentEventParser()).subscribe(subscriber);
             subscriber.request(1);
             assertThat(subscriber.next() instanceof HttpResponseReceived, is(true));
             subscriber.request(1);
+
+            awaitBlockedBodyRead(releaseBody);
 
             CompletableFuture<Void> cancellation = CompletableFuture.runAsync(subscriber::cancel);
             cancellation.get(5, TimeUnit.SECONDS);
@@ -237,13 +244,15 @@ class HelidonHttpClientStreamTest {
                 handlerFinished.countDown();
             }
         });
-        startClient();
+        startClientWithObservedBody();
         RecordingSubscriber subscriber = new RecordingSubscriber();
         try {
             client.stream(request("/silent"), new DefaultServerSentEventParser()).subscribe(subscriber);
             subscriber.request(1);
             assertThat(subscriber.next() instanceof HttpResponseReceived, is(true));
             subscriber.request(1);
+
+            awaitBlockedBodyRead(releaseBody);
 
             CompletableFuture<Void> close = CompletableFuture.runAsync(client::close);
             close.get(5, TimeUnit.SECONDS);
@@ -333,10 +342,12 @@ class HelidonHttpClientStreamTest {
                 handlerFinished.countDown();
             }
         });
-        startClient();
+        startClientWithObservedBody();
         try {
             CompletableFuture<?> result = client.executeAsync(request("/silent"));
             assertThat(responseSent.await(5, TimeUnit.SECONDS), is(true));
+
+            awaitBlockedBodyRead(releaseBody);
 
             CompletableFuture.runAsync(() -> result.cancel(true)).get(5, TimeUnit.SECONDS);
 
@@ -623,14 +634,60 @@ class HelidonHttpClientStreamTest {
     }
 
     private void startClient() {
+        startClient(false);
+    }
+
+    private void startClientWithObservedBody() {
+        startClient(true);
+    }
+
+    private void startClient(boolean observeBody) {
         webClient = WebClient.create(builder -> builder
                 .baseUri(baseUrl())
                 .servicesDiscoverServices(false)
                 .addService((chain, request) -> {
                     workerThread.compareAndSet(null, Thread.currentThread());
-                    return chain.proceed(request);
+                    WebClientServiceResponse response = chain.proceed(request);
+                    if (!observeBody) {
+                        return response;
+                    }
+                    return response.inputStream()
+                            .map(body -> WebClientServiceResponse.builder(response)
+                                    .inputStream(new ObservedInputStream(body, bodyBytesRead))
+                                    .build())
+                            .orElse(response);
                 }));
         client = HelidonHttpClient.builder().webClient(webClient).build();
+    }
+
+    private void awaitBlockedBodyRead(CountDownLatch releaseBody) throws InterruptedException {
+        assertThat("native body bytes consumed", bodyBytesRead.await(5, TimeUnit.SECONDS), is(true));
+        Thread worker = workerThread.get();
+        assertThat(worker, notNullValue());
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        StackTraceElement[] stack = new StackTraceElement[0];
+        Thread.State state = worker.getState();
+        while (System.nanoTime() < deadline) {
+            state = worker.getState();
+            stack = worker.getStackTrace();
+            boolean delegateRead = false;
+            for (StackTraceElement frame : stack) {
+                if (frame.getClassName().equals(ObservedInputStream.class.getName()) && frame.getMethodName().equals("read")) {
+                    if (delegateRead && (state == Thread.State.WAITING || state == Thread.State.TIMED_WAITING)
+                            && (worker.getState() == Thread.State.WAITING || worker.getState() == Thread.State.TIMED_WAITING)) {
+                        assertThat("server still holds the body open", releaseBody.getCount(), is(1L));
+                        return;
+                    }
+                    break;
+                }
+                if (frame.getMethodName().equals("read")) {
+                    delegateRead = true;
+                }
+            }
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+        }
+        throw new AssertionError("worker did not block in the native body read; state=" + state
+                                         + ", stack=" + Arrays.toString(stack));
     }
 
     private String baseUrl() {
@@ -678,6 +735,33 @@ class HelidonHttpClientStreamTest {
             releaseHeaders.countDown();
         }
         assertThat(handlerFinished.await(5, TimeUnit.SECONDS), is(true));
+    }
+
+    private static final class ObservedInputStream extends FilterInputStream {
+        private final CountDownLatch bytesRead;
+
+        private ObservedInputStream(InputStream delegate, CountDownLatch bytesRead) {
+            super(delegate);
+            this.bytesRead = bytesRead;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int result = in.read();
+            if (result >= 0) {
+                bytesRead.countDown();
+            }
+            return result;
+        }
+
+        @Override
+        public int read(byte[] bytes, int offset, int length) throws IOException {
+            int result = in.read(bytes, offset, length);
+            if (result > 0) {
+                bytesRead.countDown();
+            }
+            return result;
+        }
     }
 
     private static final class TrackingParser implements ServerSentEventParser {

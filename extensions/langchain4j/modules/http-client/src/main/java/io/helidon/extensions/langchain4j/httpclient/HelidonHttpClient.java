@@ -322,14 +322,20 @@ public final class HelidonHttpClient implements HttpClient, AutoCloseable, Runti
     private abstract class ActiveCall {
         private final AtomicBoolean cancelled = new AtomicBoolean();
         private final AtomicReference<HttpClientResponse> response = new AtomicReference<>();
-        private volatile Thread worker;
+        private final ReentrantLock workerLock = new ReentrantLock();
+        private Thread worker;
 
         boolean cancelled() {
             return cancelled.get();
         }
 
         void worker(Thread worker) {
-            this.worker = worker;
+            workerLock.lock();
+            try {
+                this.worker = worker;
+            } finally {
+                workerLock.unlock();
+            }
         }
 
         void start(Context context, Runnable action) {
@@ -337,9 +343,11 @@ public final class HelidonHttpClient implements HttpClient, AutoCloseable, Runti
                 cancel();
                 return;
             }
-            worker = Thread.ofVirtual().start(() -> Contexts.runInContext(context, action));
+            Thread started = Thread.ofVirtual().unstarted(() -> Contexts.runInContext(context, action));
+            worker(started);
+            started.start();
             if (cancelled.get()) {
-                worker.interrupt();
+                interruptWorker();
             }
         }
 
@@ -357,20 +365,38 @@ public final class HelidonHttpClient implements HttpClient, AutoCloseable, Runti
             if (cancelled.compareAndSet(false, true)) {
                 onCancel();
                 closeResponse();
-                Thread current = worker;
-                if (current != null && current != Thread.currentThread()) {
-                    current.interrupt();
-                }
+                interruptWorker();
                 activeCalls.remove(this);
             }
         }
 
         void finish() {
             activeCalls.remove(this);
-            closeResponse();
+            try {
+                closeResponse();
+            } finally {
+                workerLock.lock();
+                try {
+                    worker = null;
+                } finally {
+                    workerLock.unlock();
+                }
+            }
         }
 
         void onCancel() {
+        }
+
+        private void interruptWorker() {
+            workerLock.lock();
+            try {
+                Thread current = worker;
+                if (current != null && current != Thread.currentThread()) {
+                    current.interrupt();
+                }
+            } finally {
+                workerLock.unlock();
+            }
         }
 
         private void closeResponse() {
