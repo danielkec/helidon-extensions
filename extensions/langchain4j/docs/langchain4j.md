@@ -238,6 +238,11 @@ langchain4j:
 ### MCP HTTP Clients
 
 Configured MCP clients use Helidon WebClient for Streamable HTTP connections.
+Applications upgrading from the JDK transport that need HTTP/2 over TLS must add
+`io.helidon.webclient:helidon-webclient-http2`. For modular applications, declare
+`requires io.helidon.webclient.http2;` in `module-info.java`. With Helidon
+27.0.0, set a positive `web-client.read-timeout` for HTTP/2 streams. See the
+[HTTP/2 configuration example](../modules/http-client/README.md#connecting-to-an-http2-endpoint).
 Configure its native services, TLS and timeouts under the client's `web-client`
 node. MCP defaults to a 60-second connect timeout, no read timeout for
 long-lived streams, and no redirects; explicit native options override these

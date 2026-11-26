@@ -16,6 +16,34 @@ LangChain4j snapshots are needed.
 mvn -pl extensions/langchain4j/modules/http-client -am test
 ```
 
+## Connecting to an HTTP/2 endpoint
+
+The Helidon MCP client includes HTTP/1.1 support by default. If your application
+relied on the previous JDK transport to negotiate HTTP/2, add the Helidon HTTP/2
+provider to the application's dependencies:
+
+```xml
+<dependency>
+    <groupId>io.helidon.webclient</groupId>
+    <artifactId>helidon-webclient-http2</artifactId>
+</dependency>
+```
+
+For a modular application, add `requires io.helidon.webclient.http2;` to its
+`module-info.java`. WebClient then offers `h2` during TLS negotiation. With Helidon
+27.0.0, also set a positive `web-client.read-timeout`: the HTTP/2 provider treats
+the MCP default of `PT0S` as an immediate stream timeout. Choose an interval long
+enough for your endpoint's longest expected pause between response data.
+
+```yaml
+langchain4j:
+  mcp-clients:
+    tools:
+      uri: https://tools.example.com/mcp
+      web-client:
+        read-timeout: PT10S
+```
+
 ## MCP context and header propagation
 
 The module registers a Helidon `ExecutorProvider` through `ServiceLoader`. MCP uses
