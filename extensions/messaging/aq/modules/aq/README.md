@@ -578,7 +578,11 @@ defaults above.
 | `no-local` | Incoming | `false`; requires `TOPIC` and excludes messages published by the receiving connection according to provider semantics |
 | `max-body-bytes` | Incoming | `1048576` bytes (`1 MiB`); Helidon `Size` limited to a positive value at most 2,147,483,647 bytes, applied to each incoming bytes-message body and detached BLOB |
 | `max-lob-characters` | Incoming | `1048576`; positive integer limit on each detached CLOB or NCLOB character value |
-| `receive-timeout` | Incoming | `PT0.1S`; maximum duration of each receive call, at least one millisecond |
+| `receive-timeout` | Incoming | Wait requested from JMS for each receive call. Defaults to `PT0.1S` and must be at least one millisecond. |
+
+A receive call can take longer than the requested wait. On Oracle Free with AQ API 19.3.0.0, an empty queue
+took about one second to return with the default 100 ms request. The channel holds its delivery reservation
+until the call returns.
 
 Explicit channel `durable: false` also suppresses an inherited `subscription-name`. An explicitly supplied channel
 subscription name still requires durability. Each channel has its own connection, so `no-local` is not an

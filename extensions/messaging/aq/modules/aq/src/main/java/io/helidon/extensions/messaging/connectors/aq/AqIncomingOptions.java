@@ -89,7 +89,8 @@ interface AqIncomingOptions {
     Optional<Integer> maxLobCharacters();
 
     /**
-     * Maximum duration of a receive call. Defaults to 100 milliseconds.
+     * Wait requested from the JMS provider for each receive call. Defaults to 100 milliseconds.
+     * The provider can take longer to return when the queue is empty.
      *
      * @return receive timeout
      */
