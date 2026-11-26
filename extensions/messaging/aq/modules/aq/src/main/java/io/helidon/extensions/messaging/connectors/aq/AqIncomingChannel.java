@@ -74,8 +74,9 @@ final class AqIncomingChannel implements IncomingChannel {
             if (context.maxDeliveryMessages() < 1) {
                 throw new MessagingException("AQ incoming channel requires capacity for one message");
             }
+            AqResources initial;
             try {
-                resources.open();
+                initial = resources.open();
             } catch (RuntimeException e) {
                 if (closed.get() || draining.get()) {
                     return;
@@ -85,22 +86,17 @@ final class AqIncomingChannel implements IncomingChannel {
             if (!context.awaitRunning() || closed.get() || draining.get()) {
                 return;
             }
-            AqResources receivingResources = null;
+            try {
+                initial.beginReceiving();
+            } catch (JMSException | RuntimeException e) {
+                if (!recover(initial, e)) {
+                    throw e;
+                }
+            }
             while (!closed.get() && !draining.get()) {
                 AqResources current = resources.awaitReady();
                 if (current == null || closed.get() || draining.get()) {
                     break;
-                }
-                if (current != receivingResources) {
-                    try {
-                        current.beginReceiving();
-                    } catch (JMSException | RuntimeException e) {
-                        if (recover(current, e)) {
-                            continue;
-                        }
-                        throw e;
-                    }
-                    receivingResources = current;
                 }
                 var available = context.tryReserveDelivery();
                 if (available.isEmpty()) {

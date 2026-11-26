@@ -77,7 +77,9 @@ class AqIncomingReconnectTest {
         channel.run(context);
         channel.close();
 
-        verify(context).awaitRunning();
+        var startup = inOrder(context, first.connection());
+        startup.verify(context).awaitRunning();
+        startup.verify(first.connection()).start();
         verify(unused, never()).start(any(MessageBatch.class));
         verify(unused).close();
         verify(accepted).start(any(MessageBatch.class));
@@ -372,6 +374,52 @@ class AqIncomingReconnectTest {
         verify(factory, times(2)).createConnection();
         verify(first.connection()).close();
         verify(first.session(), never()).commit();
+    }
+
+    @Test
+    void testReplacementStartFailureExhaustsSingleRecoveryAttempt() throws Exception {
+        Client first = client(true);
+        Client replacement = client(true);
+        ConnectionFactory factory = mock(ConnectionFactory.class);
+        when(factory.createConnection()).thenReturn(first.connection(), replacement.connection())
+                .thenThrow(new JMSException("unexpected third connection"));
+        when(first.consumer().receive(100)).thenThrow(disconnected());
+        doThrow(disconnected()).when(replacement.connection()).start();
+        var unused = reservation(mock(ConnectorDelivery.class));
+        try (var channel = channel(factory, true, AqReconnectConfig.builder().retry(retry -> retry.calls(1)).build())) {
+            assertThrows(MessagingException.class, () -> channel.run(context(unused)));
+        }
+        verify(factory, times(2)).createConnection();
+        verify(replacement.connection()).start();
+        verify(replacement.connection()).close();
+        verify(replacement.consumer(), never()).receive(100);
+        verify(unused, never()).start(any(MessageBatch.class));
+    }
+
+    @Test
+    void testNextRecoveryAttemptStartsReceivingOnce() throws Exception {
+        Client first = client(true);
+        Client failed = client(true);
+        Client recovered = client(true);
+        ConnectionFactory factory = mock(ConnectionFactory.class);
+        when(factory.createConnection()).thenReturn(first.connection(), failed.connection(), recovered.connection());
+        when(first.consumer().receive(100)).thenThrow(disconnected());
+        doThrow(disconnected()).when(failed.connection()).start();
+        TextMessage next = message("next");
+        when(recovered.consumer().receive(100)).thenReturn(next);
+        ConnectorDelivery delivery = mock(ConnectorDelivery.class);
+        var accepted = reservation(delivery);
+        try (var channel = channel(factory, true, AqReconnectConfig.builder()
+                .retry(retry -> retry.calls(2).delay(Duration.ZERO)).build())) {
+            drainAfterDelivery(channel, delivery);
+            channel.run(context(reservation(mock(ConnectorDelivery.class)), accepted));
+        }
+        verify(factory, times(3)).createConnection();
+        verify(failed.connection()).close();
+        verify(failed.consumer(), never()).receive(100);
+        verify(recovered.connection()).start();
+        verify(accepted).start(any(MessageBatch.class));
+        verify(recovered.session()).commit();
     }
 
     @Test

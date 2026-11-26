@@ -452,6 +452,9 @@ Established channels reconnect automatically after recognized database or networ
 obtains a fresh connection from the same application-owned data source or connection factory and restores the AQ
 session, destination, selector, recipient or durable subscription. The data source and its pool remain open.
 Initial startup makes one connection attempt, bounded by `reconnect.connect-timeout`.
+An incoming channel starts its initial JMS connection after the graph is running. During recovery, starting
+delivery on a replacement connection is part of the same timed connection attempt. The consumer resumes receiving
+only after that start succeeds.
 If that attempt times out, graph startup throws `AqConnectionTimeoutException`, which applications can catch.
 This startup failure differs from an outgoing send's `reconnect.wait-timeout` failure, which reports a
 `BatchDeliveryException` with its items not attempted.

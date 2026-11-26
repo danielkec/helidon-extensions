@@ -65,20 +65,11 @@ final class AqResources implements AutoCloseable {
     }
 
     void open(boolean incoming) {
-        lock.lock();
-        try {
-            if (closed || started) {
-                throw new IllegalStateException("AQ channel cannot be started more than once or after closing");
-            }
-            started = true;
-            initializer = Thread.ofVirtual()
-                    .name("aq-start-" + config.channelName())
-                    .unstarted(() -> initialize(incoming));
-            initializer.start();
-        } finally {
-            lock.unlock();
-        }
-        awaitReady();
+        open(incoming, false);
+    }
+
+    void openReplacement(boolean incoming) {
+        open(incoming, incoming);
     }
 
     Session session() {
@@ -167,7 +158,24 @@ final class AqResources implements AutoCloseable {
         }
     }
 
-    private void initialize(boolean incoming) {
+    private void open(boolean incoming, boolean startReceiving) {
+        lock.lock();
+        try {
+            if (closed || started) {
+                throw new IllegalStateException("AQ channel cannot be started more than once or after closing");
+            }
+            started = true;
+            initializer = Thread.ofVirtual()
+                    .name("aq-start-" + config.channelName())
+                    .unstarted(() -> initialize(incoming, startReceiving));
+            initializer.start();
+        } finally {
+            lock.unlock();
+        }
+        awaitReady();
+    }
+
+    private void initialize(boolean incoming, boolean startReceiving) {
         try {
             ConnectionFactory factory = resolver.resolve(config);
             if (isClosed()) {
@@ -205,6 +213,9 @@ final class AqResources implements AutoCloseable {
                     return;
                 }
                 consumer = createdConsumer;
+                if (startReceiving) {
+                    beginReceiving();
+                }
             } else {
                 MessageProducer createdProducer = createdSession instanceof AQjmsSession aq
                         && config.destinationType() == AqDestinationType.TOPIC

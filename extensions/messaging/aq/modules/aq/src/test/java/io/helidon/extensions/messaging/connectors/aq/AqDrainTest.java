@@ -16,6 +16,7 @@
 
 package io.helidon.extensions.messaging.connectors.aq;
 
+import java.sql.SQLRecoverableException;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.Optional;
@@ -57,6 +58,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -347,6 +349,90 @@ class AqDrainTest {
         verify(client.session(), never()).commit();
     }
 
+    @Test
+    void drainWhileReplacementStartsClosesItWithoutReceiving() throws Exception {
+        Client original = client();
+        Client replacement = client();
+        loseConnection(original);
+        when(original.factory().createConnection()).thenReturn(original.connection(), replacement.connection());
+        CountDownLatch starting = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(_ -> {
+            starting.countDown();
+            awaitIgnoringInterruption(release, interrupted);
+            return null;
+        }).when(replacement.connection()).start();
+        AqIncomingChannel channel = incoming(original);
+        FutureTask<Void> run = run(channel, reservation());
+        Thread runner = Thread.ofVirtual().start(run);
+        try {
+            assertThat(starting.await(2, TimeUnit.SECONDS), is(true));
+            channel.drain();
+            assertThat(interrupted.await(2, TimeUnit.SECONDS), is(true));
+            release.countDown();
+            run.get(2, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            channel.forceClose();
+            runner.join(Duration.ofSeconds(2));
+            channel.close();
+        }
+        verify(original.factory(), times(2)).createConnection();
+        verify(replacement.connection()).close();
+        verify(replacement.consumer(), never()).receive(30_000);
+    }
+
+    @Test
+    void timedOutReplacementStartFinishesBeforeNextConnectionOpens() throws Exception {
+        Client original = client();
+        Client slow = client();
+        Client healthy = client();
+        loseConnection(original);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch startReturned = new CountDownLatch(1);
+        doAnswer(_ -> {
+            awaitIgnoringInterruption(release, interrupted);
+            startReturned.countDown();
+            return null;
+        }).when(slow.connection()).start();
+        when(original.factory().createConnection()).thenReturn(original.connection(), slow.connection()).thenAnswer(_ -> {
+            assertThat(startReturned.getCount(), is(0L));
+            return healthy.connection();
+        });
+        AqIncomingChannel channel = incoming(original, AqReconnectConfig.builder()
+                .connectTimeout(Duration.ofMillis(500))
+                .retry(retry -> retry.calls(2).delay(Duration.ZERO).overallTimeout(Duration.ofSeconds(5)))
+                .build());
+        when(healthy.consumer().receive(30_000)).thenAnswer(_ -> {
+            channel.drain();
+            return null;
+        });
+        FutureTask<Void> run = run(channel, reservation());
+        Thread runner = Thread.ofVirtual().start(run);
+        try {
+            assertThat(interrupted.await(3, TimeUnit.SECONDS), is(true));
+            release.countDown();
+            run.get(2, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            channel.forceClose();
+            runner.join(Duration.ofSeconds(2));
+            channel.close();
+        }
+        verify(original.factory(), times(3)).createConnection();
+        verify(slow.connection()).close();
+        verify(slow.consumer(), never()).receive(30_000);
+        verify(healthy.consumer()).receive(30_000);
+    }
+
+    private static void loseConnection(Client client) throws JMSException {
+        JMSException failure = new JMSException("connection lost");
+        failure.setLinkedException(new SQLRecoverableException("connection lost", "08006"));
+        when(client.consumer().receive(30_000)).thenThrow(failure);
+    }
+
     private static Client client() throws Exception {
         ConnectionFactory factory = mock(ConnectionFactory.class);
         Connection connection = mock(Connection.class);
@@ -385,9 +471,14 @@ class AqDrainTest {
     }
 
     private static AqIncomingChannel incoming(Client client) {
+        return incoming(client, AqReconnectConfig.create());
+    }
+
+    private static AqIncomingChannel incoming(Client client, AqReconnectConfig reconnect) {
         AqRuntimeConfig config = AqRuntimeConfig.incoming(AqConnectorConfig.builder()
                 .name("aq")
                 .connectionFactory(client.factory())
+                .reconnect(reconnect)
                 .destination("ORDERS")
                 .receiveTimeout(Duration.ofSeconds(30))
                 .closeTimeout(Duration.ofSeconds(2))

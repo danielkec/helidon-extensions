@@ -54,7 +54,7 @@ final class AqResourceManager implements AutoCloseable {
         this.incoming = incoming;
     }
 
-    void open() {
+    AqResources open() {
         AqResources resources;
         lock.lock();
         try {
@@ -72,6 +72,7 @@ final class AqResourceManager implements AutoCloseable {
             if (!publish(resources)) {
                 throw new MessagingException("AQ channel closed during startup");
             }
+            return resources;
         } catch (Throwable e) {
             resources.forceClose();
             recordFailure(e, true);
@@ -231,7 +232,7 @@ final class AqResourceManager implements AutoCloseable {
             return false;
         }
         try {
-            resources.open(incoming);
+            resources.openReplacement(incoming);
             if (publish(resources)) {
                 LOGGER.log(System.Logger.Level.INFO, "AQ channel {0} reconnected", config.channelName());
                 return true;

@@ -61,6 +61,7 @@ interface AqReconnectConfigBlueprint {
 
     /**
      * Maximum wait for one initial or recovery connection attempt.
+     * For an incoming replacement this includes starting JMS delivery.
      * A late provider result is closed; another attempt waits for its cleanup.
      *
      * @return connection attempt timeout
