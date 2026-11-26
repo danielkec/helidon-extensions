@@ -31,6 +31,7 @@ langchain4j:
   mcp-clients:
     tools:
       uri: https://tools.example.com/mcp
+      auto-health-check: false
       web-client:
         services:
           context:
@@ -46,6 +47,11 @@ plus the application's tracing provider for native tracing. Configure the server
 bearer values. The normal Helidon tracing observer establishes the incoming span;
 `WebClientTracing` creates the outbound client span and injects W3C tracing headers.
 Neither the application handler nor MCP needs to copy headers or supply `customHeaders`.
+
+LangChain4j MCP 1.23.0-beta33 enables automatic health checks by default. Scheduled
+checks and the reconnects they trigger run without the caller's bearer token, so a
+server that requires it returns HTTP 401. The example disables those checks with
+`auto-health-check: false`. See [LangChain4j issue #6984](https://github.com/langchain4j/langchain4j/issues/6984).
 
 The native WebClient configuration accepts its usual services, timeouts and TLS options.
 MCP defaults to a 60-second connect timeout, no read timeout for long-lived streams,
