@@ -17,11 +17,15 @@
 package io.helidon.extensions.langchain4j.httpclient;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Predicate;
 
 import io.helidon.http.HeaderNames;
 import io.helidon.security.Security;
@@ -127,8 +131,8 @@ final class PropagationTestSupport implements AutoCloseable {
         return tracer;
     }
 
-    List<SpanData> spans() {
-        return exporter.spans();
+    List<SpanData> awaitSpans(Predicate<List<SpanData>> ready, Duration timeout) throws InterruptedException {
+        return exporter.awaitSpans(ready, timeout);
     }
 
     @Override
@@ -139,10 +143,18 @@ final class PropagationTestSupport implements AutoCloseable {
 
     private static final class RecordingSpanExporter implements SpanExporter {
         private final List<SpanData> spans = new CopyOnWriteArrayList<>();
+        private final ReentrantLock lock = new ReentrantLock();
+        private final Condition exported = lock.newCondition();
 
         @Override
         public CompletableResultCode export(Collection<SpanData> spans) {
-            this.spans.addAll(spans);
+            lock.lock();
+            try {
+                this.spans.addAll(spans);
+                exported.signalAll();
+            } finally {
+                lock.unlock();
+            }
             return CompletableResultCode.ofSuccess();
         }
 
@@ -156,8 +168,28 @@ final class PropagationTestSupport implements AutoCloseable {
             return CompletableResultCode.ofSuccess();
         }
 
-        List<SpanData> spans() {
-            return List.copyOf(spans);
+        List<SpanData> awaitSpans(Predicate<List<SpanData>> ready, Duration timeout) throws InterruptedException {
+            long remaining = timeout.toNanos();
+            lock.lockInterruptibly();
+            try {
+                while (true) {
+                    List<SpanData> snapshot = List.copyOf(spans);
+                    if (ready.test(snapshot)) {
+                        return snapshot;
+                    }
+                    if (remaining <= 0) {
+                        throw new AssertionError("Timed out waiting for exported spans; observed: "
+                                                         + snapshot.stream()
+                                                                 .map(span -> span.getKind() + ":" + span.getTraceId()
+                                                                         + ":" + span.getSpanId() + ":"
+                                                                         + span.getParentSpanId())
+                                                                 .toList());
+                    }
+                    remaining = exported.awaitNanos(remaining);
+                }
+            } finally {
+                lock.unlock();
+            }
         }
     }
 }

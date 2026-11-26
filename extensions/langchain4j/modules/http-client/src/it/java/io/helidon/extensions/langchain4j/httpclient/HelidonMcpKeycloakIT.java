@@ -189,17 +189,25 @@ class HelidonMcpKeycloakIT {
                             mcpByNonce.put(mcpObservation.nonce(), mcpObservation);
                         }
                         assertThat(mcpByNonce.get(bootstrapNonce).traceState(), is("lc4j=alice"));
+                        assertThat(ingressByNonce.get(aliceNonce), notNullValue());
+                        assertThat(mcpByNonce.get(aliceNonce), notNullValue());
+                        assertThat(ingressByNonce.get(bobNonce), notNullValue());
+                        assertThat(mcpByNonce.get(bobNonce), notNullValue());
+                        List<SpanData> spans = propagation.awaitSpans(
+                                exported -> hasTraceSpans(exported, ingressByNonce.get(aliceNonce), mcpByNonce.get(aliceNonce))
+                                        && hasTraceSpans(exported, ingressByNonce.get(bobNonce), mcpByNonce.get(bobNonce)),
+                                TIMEOUT);
                         assertPropagation(
                                 ingressByNonce.get(aliceNonce),
                                 mcpByNonce.get(aliceNonce),
                                 new ExpectedCall(aliceTrace, "aaaaaaaaaaaaaaaa", ALICE, fingerprint(aliceToken)),
-                                propagation.spans());
+                                spans);
                         assertThat(mcpByNonce.get(aliceNonce).traceState(), is("lc4j=alice"));
                         assertPropagation(
                                 ingressByNonce.get(bobNonce),
                                 mcpByNonce.get(bobNonce),
                                 new ExpectedCall(bobTrace, "bbbbbbbbbbbbbbbb", BOB, fingerprint(bobToken)),
-                                propagation.spans());
+                                spans);
                         assertThat(mcpByNonce.get(bobNonce).traceState(), is("lc4j=bob"));
                     } finally {
                         ingress.stop();
@@ -383,6 +391,20 @@ class HelidonMcpKeycloakIT {
     private static String fingerprint(String token) throws Exception {
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                 .digest(token.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static boolean hasTraceSpans(List<SpanData> spans,
+                                         IngressObservation ingress,
+                                         SecuredMcpServer.Observation mcp) {
+        return spans.stream().anyMatch(span -> span.getKind() == SpanKind.SERVER
+                && ingress.traceId.equals(span.getTraceId())
+                && ingress.spanId.equals(span.getSpanId()))
+                && spans.stream().anyMatch(span -> span.getKind() == SpanKind.CLIENT
+                        && mcp.traceId().equals(span.getTraceId())
+                        && mcp.parentSpanId().equals(span.getSpanId()))
+                && spans.stream().anyMatch(span -> span.getKind() == SpanKind.SERVER
+                        && mcp.traceId().equals(span.getTraceId())
+                        && mcp.serverSpanId().equals(span.getSpanId()));
     }
 
     private static void assertPropagation(
