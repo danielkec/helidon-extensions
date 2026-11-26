@@ -49,8 +49,12 @@ langchain4j:
 The module registers a Helidon `ExecutorProvider` through `ServiceLoader`. MCP uses
 its `captureContext()` hook before deferring work for initialization or retries; the
 adapter carries that Helidon Context into its own virtual thread. Applications do not
-need to register the provider manually. An application-supplied `ExecutorProvider`
-takes precedence and must preserve Helidon Context to retain this behavior.
+need to register the provider manually. Helidon's provider uses LangChain4j's
+`YIELDS_TO_OTHERS` priority. An application provider registered through
+`ServiceLoader` at the default priority wins in either classpath order.
+LangChain4j also honors a programmatic override via `ExecutorProvider.set(...)`.
+The selected provider must implement `captureContext()` to propagate Helidon
+Context across deferred MCP work.
 
 Configure native WebClient services under each MCP client's `web-client` node:
 

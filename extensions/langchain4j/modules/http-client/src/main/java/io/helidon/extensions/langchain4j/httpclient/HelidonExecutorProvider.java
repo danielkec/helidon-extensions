@@ -24,16 +24,22 @@ import io.helidon.common.context.Contexts;
 
 import dev.langchain4j.spi.CapturedContext;
 import dev.langchain4j.spi.ExecutorProvider;
+import dev.langchain4j.spi.PrioritizedFactory;
 
 /**
  * LangChain4j service provider that preserves the caller's Helidon context across deferred work.
  * Native WebClient services use this context for header and tracing propagation.
  */
-public final class HelidonExecutorProvider implements ExecutorProvider {
+public final class HelidonExecutorProvider implements ExecutorProvider, PrioritizedFactory {
     /**
      * Creates the provider. Public construction is required by {@link java.util.ServiceLoader}.
      */
     public HelidonExecutorProvider() {
+    }
+
+    @Override
+    public int priority() {
+        return YIELDS_TO_OTHERS;
     }
 
     /**
