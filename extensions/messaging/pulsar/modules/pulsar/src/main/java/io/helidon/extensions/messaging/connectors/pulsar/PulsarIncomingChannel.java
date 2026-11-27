@@ -103,11 +103,15 @@ final class PulsarIncomingChannel {
 
         private static PendingBatch create(List<Message<Object>> nativeMessages,
                                            IncomingSettings config,
-                                           PulsarSchemaResolver.ResolvedSchema schema) {
+                                           PulsarSchemaResolver.ResolvedSchema schema,
+                                           AtomicBoolean forceCloseRequested) {
             List<PulsarMessage<Object>> messages = new ArrayList<>(nativeMessages.size());
             List<BatchItemOutcome> outcomes = new ArrayList<>(nativeMessages.size());
             RuntimeException primaryFailure = null;
             for (int i = 0; i < nativeMessages.size(); i++) {
+                if (forceCloseRequested.get()) {
+                    throw new CancellationException("Pulsar batch mapping cancelled on channel " + config.channelName());
+                }
                 Message<Object> nativeMessage = nativeMessages.get(i);
                 try {
                     messages.add(PulsarMessageMapper.fromPulsarMessage(nativeMessage, config, schema));
@@ -116,8 +120,6 @@ final class PulsarIncomingChannel {
                     outcomes.add(BatchItemOutcome.failed(i, e));
                     if (primaryFailure == null) {
                         primaryFailure = e;
-                    } else if (primaryFailure != e) {
-                        primaryFailure.addSuppressed(e);
                     }
                     try {
                         messages.add(PulsarMessageMapper.metadataOnly(nativeMessage));
@@ -396,7 +398,7 @@ final class PulsarIncomingChannel {
             PendingBatch pending;
             ConnectorDelivery delivery;
             try {
-                pending = PendingBatch.create(nativeMessages, config, schema);
+                pending = PendingBatch.create(nativeMessages, config, schema, forceCloseRequested);
                 delivery = pending.mappingFailure == null
                         ? startDelivery(() -> reservation.start(pending.batch))
                         : startDelivery(() -> reservation.startFailed(pending.batch, pending.mappingFailure));

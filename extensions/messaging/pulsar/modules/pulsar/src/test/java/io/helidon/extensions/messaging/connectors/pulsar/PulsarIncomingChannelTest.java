@@ -685,6 +685,35 @@ class PulsarIncomingChannelTest {
     }
 
     @Test
+    void mappingFailuresRemainIsolatedByBatchIndex() throws Exception {
+        TestContext context = new TestContext(false);
+        FakeSource source = batchSource(context, "aa", "b", "ccc");
+        IncomingChannel connector = new PulsarIncomingChannel(_ -> source.client())
+                .createIncomingChannel(commonConfig(), config(1));
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread owner = Thread.ofVirtual().start(() -> run(connector, context, failure));
+
+        try {
+            assertThat(source.acknowledged.await(WAIT.toMillis(), TimeUnit.MILLISECONDS), is(true));
+            connector.drain();
+            owner.join(WAIT.toMillis());
+            assertThat(failure.get(), nullValue());
+            BatchDeliveryException mapping = (BatchDeliveryException) context.mappingFailure.get();
+            Throwable first = mapping.outcome(0).failure().orElseThrow();
+            Throwable third = mapping.outcome(2).failure().orElseThrow();
+            assertThat(first.getMessage(), containsString("payload size 2"));
+            assertThat(mapping.outcome(1).status(), is(BatchItemStatus.NOT_ATTEMPTED));
+            assertThat(mapping.batch().get(1).entity(), is("b"));
+            assertThat(third.getMessage(), containsString("payload size 3"));
+            assertThat(mapping.getCause(), sameInstance(first));
+            assertThat(first.getSuppressed(), is(new Throwable[0]));
+        } finally {
+            connector.forceClose();
+            owner.join(WAIT.toMillis());
+        }
+    }
+
+    @Test
     void mixedMappingFailurePreservesValidSiblingsAsNotAttempted() throws Exception {
         TestContext context = new TestContext(false);
         FakeSource source = batchSource(context, "a", "oversized", "b");
@@ -914,6 +943,53 @@ class PulsarIncomingChannelTest {
             assertThat(source.negativeAcks.get(), is(0));
             assertThat(source.shutdownCalls.get(), is(1));
         } finally {
+            connector.forceClose();
+            owner.join(WAIT.toMillis());
+        }
+    }
+
+    @Test
+    void forceCloseDuringMappingSkipsRemainingMessages() throws Exception {
+        TestContext context = new TestContext(false);
+        FakeSource source = new FakeSource(null, context.reserved);
+        CountDownLatch decodingFirst = new CountDownLatch(1);
+        CompletableFuture<Void> finishFirst = new CompletableFuture<>();
+        ConcurrentLinkedQueue<String> mappingAttempts = new ConcurrentLinkedQueue<>();
+        List<String> payloads = List.of("first", "second", "third");
+        source.batches.add(payloads.stream().map(payload -> {
+            Message<Object> message = PulsarTestSupport.nativeMessage(payload, payload.length());
+            @SuppressWarnings("unchecked")
+            Message<Object> observed = PulsarTestSupport.proxy(Message.class, (_, method, args) -> {
+                // Only mapping reads the payload size. The fake also reads the value during settlement.
+                if (method.getName().equals("size")) {
+                    mappingAttempts.add(payload);
+                }
+                if (method.getName().equals("getValue") && payload.equals("first")) {
+                    decodingFirst.countDown();
+                    finishFirst.join();
+                }
+                return method.invoke(message, args);
+            });
+            return observed;
+        }).toList());
+        IncomingChannel connector = new PulsarIncomingChannel(_ -> source.client())
+                .createIncomingChannel(commonConfig(), config(1024));
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread owner = Thread.ofVirtual().start(() -> run(connector, context, failure));
+        try {
+            assertThat(decodingFirst.await(WAIT.toMillis(), TimeUnit.MILLISECONDS), is(true));
+            connector.forceClose();
+            finishFirst.complete(null);
+            owner.join(WAIT.toMillis());
+            assertThat(owner.isAlive(), is(false));
+            assertThat(failure.get(), nullValue());
+            assertThat(List.copyOf(mappingAttempts), is(List.of("first")));
+            assertThat(context.started.get(), is(0));
+            assertThat(context.failedStarts.get(), is(0));
+            assertThat(context.reservationCloses.get(), is(1));
+            assertThat(List.copyOf(source.negativelyAcknowledgedPayloads), is(payloads));
+        } finally {
+            finishFirst.complete(null);
             connector.forceClose();
             owner.join(WAIT.toMillis());
         }
