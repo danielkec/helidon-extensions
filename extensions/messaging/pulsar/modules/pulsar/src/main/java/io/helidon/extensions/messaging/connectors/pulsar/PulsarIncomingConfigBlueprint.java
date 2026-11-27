@@ -111,9 +111,9 @@ interface PulsarIncomingConfigBlueprint extends MessagingIncomingConfig {
     Optional<Boolean> batchIndexAcknowledgmentEnabled();
 
     /**
-     * Maximum Pulsar client receive queue size per topic partition. The runtime delivery limit further bounds each
-     * partition queue, although aggregate client prefetch can exceed that limit for a partitioned topic. The connector
-     * acquires one bounded batch after reserving runtime capacity.
+     * Pulsar receive queue size used to request flow permits per topic partition. The runtime delivery limit caps this
+     * setting. Unpacking a producer-batched entry can buffer more logical messages than this size in a single partition.
+     * The connector reserves runtime capacity before acquiring each batch.
      *
      * @return receive queue size
      */

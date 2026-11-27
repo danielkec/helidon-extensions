@@ -136,34 +136,40 @@ Configure a compatible schema for every producer and consumer of a topic. The co
 types without numeric widening or string coercion. It defensively snapshots mutable built-in values (`byte[]`,
 `ByteBuffer`, and legacy date/time types); custom schema payloads otherwise retain their application-defined mutability.
 
-Incoming channels always use Pulsar's native batch receive. One non-empty native receive becomes one retained Helidon
-`MessageBatch`, with the original order and per-message metadata preserved. Payload and `Message` consumers are invoked
-for each item; `MessageBatch` consumers receive the complete batch. The native receive policy determines batch membership,
-independently of producer batching and outgoing Helidon batch boundaries.
+Incoming channels use Pulsar's native batch receive. When all messages map successfully, a `MessageBatch` consumer
+receives the native batch in order with its per-message metadata. Payload and `Message` consumers receive each item
+individually. If a message fails mapping and the failure policy drops or dead-letters it, the ordinary handler receives
+only the successfully mapped messages in their original order. For example, dropping an oversized message between
+`a` and `b` leaves a handler batch containing `a` and `b`. The native receive policy determines the original batch
+membership independently of producer batching and outgoing Helidon batch boundaries.
 
 | Incoming option | Default | Meaning |
 | --- | --- | --- |
 | `batch-receive-max-messages` | `100` | Maximum messages requested in one batch |
 | `batch-receive-max-bytes` | `10 MiB` | Encoded size target for one batch, from 1 to 2147483647 bytes |
 | `receive-timeout` | `PT0.1S` | Maximum native wait to accumulate a batch |
-| `receiver-queue-size` | `100` | Client prefetch queue size per topic partition |
+| `receiver-queue-size` | `100` | Per-partition receive queue setting used for Pulsar flow control |
 | `max-message-bytes` | `10485760` | Maximum encoded payload size for each incoming message |
 
 The effective queue size is the smaller of `receiver-queue-size` and the runtime delivery limit. The effective batch
 count is the smaller of that queue size and `batch-receive-max-messages`.
 The connector reserves capacity before acquiring a batch and pauses acquisition while processing and settling it.
-Aggregate client prefetch across partitions can exceed the retained delivery limit.
+Pulsar uses the effective queue size to request flow permits from the broker. A single producer-batched entry can
+contain more messages than the remaining permits. The client unpacks the entry before applying the batch count limit,
+so even one partition can buffer more logical messages than the effective queue size. For example, with the queue
+and batch count both set to five, a producer entry containing 20 messages can put all 20 in the client queue.
+Each batch delivered to Helidon still contains at most five.
 
 Pulsar asks the broker to refill several queue slots at a time. With a queue and batch count of five, an oversized
 first message can be delivered alone and leave four small messages in the queue. If those four fall below the byte
 threshold, the next batch can wait for `receive-timeout` even with a broker backlog.
 
 To leave room for refills, configure `receiver-queue-size: 7` with `batch-receive-max-messages: 5` and a runtime
-delivery limit of at least seven. Pulsar can then prefetch two extra messages per partition, allowing the next
-five-message batch to fill while the client waits to return receiver permits.
+delivery limit of at least seven. The two extra permits allow the next five-message batch to fill while the client
+waits to return receiver permits.
 
-Native automatic receiver-queue scaling is disabled to preserve the per-partition queue bound. The connector owns this
-setting and overrides `consumer-properties.autoScaledReceiverQueueSizeEnabled`.
+The connector disables native automatic receiver-queue scaling to keep the configured permit limit per partition.
+It overrides `consumer-properties.autoScaledReceiverQueueSizeEnabled`.
 
 A native receive completes when its count or byte threshold is reached, or when `receive-timeout` expires. Sparse
 traffic can wait for this collection window. An idle timeout does not dispatch an empty batch. To receive one message at
